@@ -7,7 +7,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x000600;
+        private const uint ModVersionToken = 0x000700;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -23,6 +23,8 @@ namespace Coophead
         private static bool runInBackgroundCaptured;
         private static SessionContext lastSentContext;
         private static bool hasLastSentContext;
+        private static SessionContext latestRemoteContext;
+        private static bool hasRemoteContext;
 
         public static bool Enabled { get; private set; }
         public static bool DrivesPlayerTwo => Enabled && transportMode != InputTransportMode.LanClient;
@@ -130,6 +132,7 @@ namespace Coophead
             playerTwoReported = false;
             rewiredReadReported = false;
             lastTransportStatus = null;
+            hasRemoteContext = false;
             Plugin.Log.LogMessage("Remote Input Lab " + (Enabled ? "ACTIVADO" : "DESACTIVADO") +
                 (Enabled ? " (" + transport.Description + ")." : "."));
         }
@@ -182,7 +185,7 @@ namespace Coophead
 
                 try
                 {
-                    SceneManager.LoadScene(command.SceneName, LoadSceneMode.Single);
+                    LoadRemoteScene(command.SceneName);
                 }
                 catch (System.Exception ex)
                 {
@@ -190,6 +193,40 @@ namespace Coophead
                         ": " + ex.Message);
                 }
             }
+        }
+
+        private static void LoadRemoteScene(string sceneName)
+        {
+            if (!SceneLoader.Exists || SceneLoader.CurrentlyLoading)
+            {
+                Plugin.Log.LogWarning("[SceneSync] El cargador de Cuphead todavía no está disponible.");
+                return;
+            }
+
+            if (sceneName.StartsWith("scene_level_") && hasRemoteContext &&
+                (latestRemoteContext.Flags & 4) != 0 && latestRemoteContext.CurrentLevel >= 0)
+            {
+                SceneLoader.LoadLevel(
+                    (Levels)latestRemoteContext.CurrentLevel,
+                    SceneLoader.Transition.Fade,
+                    SceneLoader.Icon.Hourglass,
+                    null);
+                Plugin.Log.LogMessage("[SceneSync] Cuphead cargando nivel remoto " +
+                    latestRemoteContext.CurrentLevel + ".");
+                return;
+            }
+
+            if (!System.Enum.IsDefined(typeof(Scenes), sceneName))
+                throw new System.ArgumentException("Escena desconocida: " + sceneName);
+            var scene = (Scenes)System.Enum.Parse(typeof(Scenes), sceneName);
+
+            SceneLoader.LoadScene(
+                scene,
+                SceneLoader.Transition.Fade,
+                SceneLoader.Transition.Fade,
+                SceneLoader.Icon.Hourglass,
+                null);
+            Plugin.Log.LogMessage("[SceneSync] Cuphead cargando escena remota " + sceneName + ".");
         }
 
         private static bool IsStableScene(string sceneName, LoadSceneMode mode)
@@ -244,6 +281,8 @@ namespace Coophead
                     " level=" + context.CurrentLevel);
                 if (!context.HasSave || context.SaveSlot > 2 || context.Difficulty > 2)
                     continue;
+                latestRemoteContext = context;
+                hasRemoteContext = true;
                 try
                 {
                     PlayerData.CurrentSaveFileIndex = context.SaveSlot;

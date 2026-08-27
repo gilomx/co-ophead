@@ -1,8 +1,8 @@
 # Prueba LAN de entradas
 
-Esta fase comprueba transporte de entradas entre dos equipos. Todavía no sincroniza
-escenas, guardado, enemigos ni progreso. El host ejecuta la partida; el cliente puede
-permanecer en el título mientras envía el teclado numérico.
+Esta fase comprueba transporte de entradas y carga de escenas entre dos equipos.
+Todavía no sincroniza enemigos, física ni progreso. El host ejecuta la partida y el
+cliente sigue sus cambios de mapa y nivel mediante el cargador interno de Cuphead.
 
 Ambos equipos necesitan la misma versión de Cuphead, BepInEx 5 y `Coophead.dll`.
 Antes de aceptar entradas, intercambian versión de mod/protocolo. Una combinación
@@ -36,18 +36,19 @@ LanHostAddress = 192.168.1.50
 LanPort = 27182
 ```
 
-3. Abre Cuphead y pulsa `F8`. Puede quedarse en el título durante esta prueba.
+3. Abre Cuphead y pulsa `F8`. El host dirigirá sus cambios de escena.
 4. Usa el teclado numérico. Los frames se envían al host por UDP.
 
 ## Resultado esperado
 
-Player Two aparece en el host y responde al teclado numérico del cliente. El cliente
-todavía no verá la partida del host; esa será la siguiente fase de sincronización.
+Player Two aparece en el host y responde al teclado numérico del cliente. Al cambiar
+de mapa o entrar a un nivel, el cliente carga la misma escena localmente.
 
 Co-ophead también envía un contexto fiable con el slot seleccionado, personaje
 principal, dificultad, mapa y nivel. El sender lo imprime como `contexto #N`. Un
-cliente Cuphead aplica únicamente slot, personaje y dificultad; mapa y nivel se
-mantienen informativos para no sobrescribir progreso local durante esta fase.
+cliente Cuphead aplica slot, personaje y dificultad. Usa el identificador de nivel
+para cargar mediante `SceneLoader`, pero no escribe mapa, victorias ni progreso en el
+guardado local.
 El host refresca el contexto cada cinco segundos para que un cliente reconectado lo
 reciba; el sender oculta refrescos idénticos y solo imprime cambios reales.
 

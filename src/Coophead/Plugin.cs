@@ -12,7 +12,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.6.0";
+        public const string PluginVersion = "0.7.0";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
 
