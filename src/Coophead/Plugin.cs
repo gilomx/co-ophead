@@ -13,7 +13,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.11.0";
+        public const string PluginVersion = "0.11.1";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
 
@@ -48,7 +48,8 @@ namespace Coophead
                 "Puerto TCP del relay.");
             roomCode = Config.Bind("Internet", "RoomCode", "",
                 "Código para InternetClient; InternetHost genera uno.");
-            signalingUrl = Config.Bind("P2P", "SignalingUrl", "http://127.0.0.1:8787",
+            signalingUrl = Config.Bind("P2P", "SignalingUrl",
+                "https://coophead-signaling.coophead-signaling.workers.dev",
                 "Servicio gratuito de señalización.");
             stunHost = Config.Bind("P2P", "StunHost", "stun.cloudflare.com",
                 "Servidor STUN para descubrir el endpoint público.");

@@ -9,6 +9,14 @@ npm run check
 npm run dev
 ```
 
+Despliegue de producción:
+
+```powershell
+npm run deploy
+```
+
+URL actual: `https://coophead-signaling.coophead-signaling.workers.dev`.
+
 Rutas:
 
 - `POST /rooms`: crea sala con `{ address, port, version }`.
