@@ -8,6 +8,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Cuphead\Cuphead_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Cuphead\Cuphead_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Compile Include="..\..\src\Coophead\InputFrame.cs" Link="InputFrame.cs" />
     <Compile Include="..\..\src\Coophead\Transport\IInputFrameTransport.cs" Link="IInputFrameTransport.cs" />
     <Compile Include="..\..\src\Coophead\Transport\InputFramePacketCodec.cs" Link="InputFramePacketCodec.cs" />

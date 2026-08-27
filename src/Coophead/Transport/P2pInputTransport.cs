@@ -1,11 +1,10 @@
 using System;
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
+using UnityEngine.Networking;
 
 namespace Coophead.Transport
 {
@@ -20,11 +19,14 @@ namespace Coophead.Transport
         private readonly byte[] transactionId = new byte[12];
         private readonly byte[] receiveBuffer = new byte[512];
         private DateTime lastStunSentUtc;
-        private volatile bool disposed;
-        private volatile string asyncStatus;
-        private volatile string asyncRoomCode;
-        private volatile IPEndPoint discoveredPeer;
+        private string asyncStatus;
+        private string asyncRoomCode;
+        private IPEndPoint discoveredPeer;
         private bool signalingStarted;
+        private string endpointJson;
+        private UnityWebRequest signalingRequest;
+        private SignalingPhase signalingPhase;
+        private DateTime nextPollUtc;
         private UdpInputTransport udp;
 
         public P2pInputTransport(string signalingUrl, bool host, string roomCode,
@@ -62,6 +64,7 @@ namespace Coophead.Transport
                 lastStunSentUtc = now;
             }
             ReceiveStun();
+            UpdateSignaling(now);
             if (discoveredPeer != null)
             {
                 udp = UdpInputTransport.CreatePeer(socket, host, discoveredPeer, versionToken);
@@ -82,53 +85,57 @@ namespace Coophead.Transport
                 var packet = new byte[count]; Buffer.BlockCopy(receiveBuffer, 0, packet, 0, count);
                 IPEndPoint publicEndpoint;
                 if (!StunPacketCodec.TryReadBindingResponse(packet, transactionId, out publicEndpoint)) continue;
-                signalingStarted = true; asyncStatus = "contactando señalización";
-                var thread = new Thread(() => RunSignaling(publicEndpoint));
-                thread.IsBackground = true; thread.Name = "Coophead P2P Signaling"; thread.Start();
+                signalingStarted = true;
+                endpointJson = "{\"address\":\"" + publicEndpoint.Address + "\",\"port\":" +
+                    publicEndpoint.Port + ",\"version\":" + versionToken + "}";
+                asyncStatus = "contactando señalización";
+                BeginRequest("POST", signalingUrl + (host ? "/rooms" : "/rooms/" + initialRoomCode),
+                    endpointJson, host ? SignalingPhase.Creating : SignalingPhase.Joining);
                 return;
             }
         }
 
-        private void RunSignaling(IPEndPoint publicEndpoint)
+        private void UpdateSignaling(DateTime now)
         {
-            try
+            if (signalingRequest == null)
             {
-                var endpointJson = "{\"address\":\"" + publicEndpoint.Address + "\",\"port\":" +
-                    publicEndpoint.Port + ",\"version\":" + versionToken + "}";
-                if (host)
-                {
-                    var created = Request("POST", signalingUrl + "/rooms", endpointJson);
-                    asyncRoomCode = MatchString(created, "code");
-                    if (asyncRoomCode.Length != 6) throw new InvalidOperationException("Señalización no entregó código.");
-                    asyncStatus = "sala " + asyncRoomCode + "; esperando jugador";
-                    while (!disposed && discoveredPeer == null)
-                    {
-                        var response = Request("GET", signalingUrl + "/rooms/" + asyncRoomCode + "?role=host", null);
-                        if (response.IndexOf("\"peer\"") >= 0) discoveredPeer = ParsePeer(response);
-                        if (discoveredPeer == null) Thread.Sleep(750);
-                    }
-                }
-                else
-                {
-                    var response = Request("POST", signalingUrl + "/rooms/" + initialRoomCode, endpointJson);
-                    discoveredPeer = ParsePeer(response);
-                }
-                if (discoveredPeer != null) asyncStatus = "peer encontrado; abriendo UDP";
+                if (host && signalingStarted && asyncRoomCode.Length == 6 &&
+                    discoveredPeer == null && now >= nextPollUtc)
+                    BeginRequest("GET", signalingUrl + "/rooms/" + asyncRoomCode + "?role=host",
+                        null, SignalingPhase.Polling);
+                return;
             }
-            catch (Exception ex) { asyncStatus = "P2P error: " + ex.Message; }
+            if (!signalingRequest.isDone) return;
+            var phase = signalingPhase;
+            var failed = signalingRequest.isNetworkError || signalingRequest.isHttpError;
+            var response = signalingRequest.downloadHandler == null ? "" : signalingRequest.downloadHandler.text;
+            var error = signalingRequest.error;
+            signalingRequest.Dispose(); signalingRequest = null; signalingPhase = SignalingPhase.None;
+            if (failed) { asyncStatus = "P2P error: " + error; return; }
+            if (phase == SignalingPhase.Creating)
+            {
+                asyncRoomCode = MatchString(response, "code");
+                if (asyncRoomCode.Length != 6) { asyncStatus = "P2P error: código inválido"; return; }
+                asyncStatus = "sala " + asyncRoomCode + "; esperando jugador";
+                nextPollUtc = now;
+            }
+            else if (phase == SignalingPhase.Joining ||
+                (phase == SignalingPhase.Polling && response.IndexOf("\"peer\"") >= 0))
+            {
+                discoveredPeer = ParsePeer(response);
+                asyncStatus = discoveredPeer == null ? "P2P error: peer inválido" : "peer encontrado; abriendo UDP";
+            }
+            else if (phase == SignalingPhase.Polling) nextPollUtc = now + TimeSpan.FromMilliseconds(750);
         }
 
-        private static string Request(string method, string url, string body)
+        private void BeginRequest(string method, string url, string body, SignalingPhase phase)
         {
-            var request = (HttpWebRequest)WebRequest.Create(url); request.Method = method;
-            request.Timeout = 5000; request.ReadWriteTimeout = 5000; request.ContentType = "application/json";
+            var request = new UnityWebRequest(url, method);
+            request.downloadHandler = new DownloadHandlerBuffer();
             if (body != null)
-            {
-                var bytes = Encoding.UTF8.GetBytes(body); request.ContentLength = bytes.Length;
-                using (var stream = request.GetRequestStream()) stream.Write(bytes, 0, bytes.Length);
-            }
-            using (var response = (HttpWebResponse)request.GetResponse())
-            using (var reader = new StreamReader(response.GetResponseStream())) return reader.ReadToEnd();
+                request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(body));
+            request.SetRequestHeader("Content-Type", "application/json"); request.timeout = 5;
+            signalingRequest = request; signalingPhase = phase; request.SendWebRequest();
         }
 
         private static IPEndPoint ParsePeer(string json)
@@ -157,6 +164,12 @@ namespace Coophead.Transport
         public bool TryReceiveContext(out SessionContext value) { if (udp != null) return udp.TryReceiveContext(out value); value = default(SessionContext); return false; }
         public void SendPlayerState(PlayerStateSnapshot value) { if (udp != null) udp.SendPlayerState(value); }
         public bool TryReceivePlayerState(out PlayerStateSnapshot value) { if (udp != null) return udp.TryReceivePlayerState(out value); value = default(PlayerStateSnapshot); return false; }
-        public void Dispose() { disposed = true; if (udp != null) udp.Dispose(); else socket.Close(); }
+        public void Dispose()
+        {
+            if (signalingRequest != null) { signalingRequest.Abort(); signalingRequest.Dispose(); signalingRequest = null; }
+            if (udp != null) udp.Dispose(); else socket.Close();
+        }
+
+        private enum SignalingPhase { None, Creating, Joining, Polling }
     }
 }
