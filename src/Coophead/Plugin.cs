@@ -95,9 +95,9 @@ namespace Coophead
             var code = RemoteInputLab.CurrentRoomCode;
             if (!string.IsNullOrEmpty(code))
                 GUILayout.Label("Sala: " + code);
-            GUILayout.Label(string.IsNullOrEmpty(onlineMessage)
-                ? "Estado: " + RemoteInputLab.TransportStatus
-                : onlineMessage);
+            GUILayout.Label("Estado: " + RemoteInputLab.TransportStatus);
+            if (!string.IsNullOrEmpty(onlineMessage))
+                GUILayout.Label(onlineMessage);
             if (GUILayout.Button("CERRAR")) showOnlineMenu = false;
             GUI.DragWindow(new Rect(0, 0, 10000, 24));
         }
@@ -107,7 +107,7 @@ namespace Coophead
             try
             {
                 RemoteInputLab.StartInternet(host, relayAddress.Value, relayPort.Value, joinCode);
-                onlineMessage = host ? "Creando sala..." : "Uniéndose a la sala...";
+                onlineMessage = "";
             }
             catch (System.Exception ex)
             {

@@ -25,3 +25,10 @@ dotnet run --project .\server\Coophead.Relay -- --self-test
 
 Esta configuración sirve para desarrollo local. La experiencia final expondrá crear
 y unirse dentro del juego y utilizará una dirección de relay incluida en el mod.
+
+## Despliegue
+
+`server/Coophead.Relay/Dockerfile` publica el servicio en el puerto TCP interno
+`27183`. En Railway se configura ese directorio como raíz y se crea un **TCP Proxy**
+hacia `27183`; el dominio y puerto externos resultantes se incluyen después como
+valores predeterminados del mod.
