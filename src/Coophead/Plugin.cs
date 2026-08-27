@@ -13,7 +13,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.11.1";
+        public const string PluginVersion = "0.11.2";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
 
@@ -81,11 +81,11 @@ namespace Coophead
         {
             if (!showOnlineMenu)
             {
-                if (GUI.Button(new Rect(20, 20, 170, 38), "CO-OPHEAD ONLINE [F6]"))
+                if (GUI.Button(new Rect(20, 20, 170, 38), "CO-OPHEAD [F6]"))
                     showOnlineMenu = true;
                 return;
             }
-            onlineWindow = GUI.Window(78216, onlineWindow, DrawOnlineWindow, "CO-OPHEAD ONLINE");
+            onlineWindow = GUI.Window(78216, onlineWindow, DrawOnlineWindow, "CO-OPHEAD");
         }
 
         private void DrawOnlineWindow(int id)

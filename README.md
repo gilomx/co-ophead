@@ -4,9 +4,9 @@ Experimento de multijugador cooperativo nativo para **Cuphead en Windows/Steam**
 En lugar de transmitir video como Steam Remote Play, cada equipo ejecuta su propia
 copia del juego y el mod intercambia entradas y una cantidad pequeña de estado.
 
-## Descargar la prueba 0.11.1
+## Descargar la prueba 0.11.2
 
-**[Descargar Co-ophead 0.11.1 para Windows x64](https://github.com/gilomx/co-ophead/raw/refs/heads/main/releases/Coophead-0.11.1-Windows-x64.zip)**
+**[Descargar Co-ophead 0.11.2 para Windows x64](https://github.com/gilomx/co-ophead/raw/refs/heads/main/releases/Coophead-0.11.2-Windows-x64.zip)**
 
 Es un paquete universal: el host y el invitado instalan exactamente el mismo ZIP.
 Ya incluye BepInEx 5.4.23.4, Co-ophead y la configuración P2P; no requiere VPN,
@@ -49,7 +49,7 @@ La superficie de integración confirmada está en [docs/GAME_API.md](docs/GAME_A
 
 ## Estado
 
-Prueba P2P 0.11.1 en curso: el plugin puede crear salas mediante señalización web,
+Prueba P2P 0.11.2 en curso: el plugin puede crear salas mediante señalización web,
 descubrir los endpoints con STUN y abrir una conexión UDP directa entre dos redes.
 
 ### Compilar
@@ -63,19 +63,19 @@ En otra instalación se puede definir `CUPHEAD_PATH` como propiedad de MSBuild o
 `Directory.Build.props.example` a `Directory.Build.props` y editarla.
 
 Para probar manualmente, copia `src/Coophead/bin/Debug/net35/Coophead.dll` a
-`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.11.1
+`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.11.2
 cargado` en `BepInEx/LogOutput.log`.
 
 ### Remote Input Lab
 
-La versión `0.11.1` puede crear y controlar localmente a Player Two sin un segundo
+La versión `0.11.2` puede crear y controlar localmente a Player Two sin un segundo
 mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
 Cuphead creará a ambos jugadores al cargar el mapa:
 
 Player Two no equivale siempre a Mugman: si Player One usa Mugman, el segundo slot
 será Cuphead, respetando el comportamiento cooperativo nativo del juego.
 
-Pulsa `F6` para abrir **Co-ophead Online**, crear una sala o unirte con un código de
+Pulsa `F6` para abrir **Co-ophead**, crear una sala o unirte con un código de
 seis caracteres. `F8` sigue activando el laboratorio de entrada local/LAN.
 
 - `Numpad 4/6`: izquierda/derecha;
