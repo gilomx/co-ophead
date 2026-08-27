@@ -7,8 +7,9 @@ namespace Coophead
     {
         private const uint SimulatedLatencyFrames = 3;
 
-        private static readonly IInputFrameTransport transport =
+        private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
+        private static InputTransportMode transportMode = InputTransportMode.Loopback;
 
         private static InputFrame received;
         private static InputButtons previousHeld;
@@ -17,6 +18,32 @@ namespace Coophead
         private static uint sourceTick;
 
         public static bool Enabled { get; private set; }
+        public static bool DrivesPlayerTwo => Enabled && transportMode != InputTransportMode.LanClient;
+
+        public static void Configure(InputTransportMode mode, string hostAddress, int port)
+        {
+            if (port < 1 || port > 65535)
+                throw new System.ArgumentOutOfRangeException("port", "LanPort debe estar entre 1 y 65535.");
+
+            IInputFrameTransport nextTransport;
+            if (mode == InputTransportMode.LanHost)
+                nextTransport = UdpInputTransport.CreateHost(port);
+            else if (mode == InputTransportMode.LanClient)
+                nextTransport = UdpInputTransport.CreateClient(hostAddress, port);
+            else
+                nextTransport = new LoopbackInputTransport(SimulatedLatencyFrames);
+
+            transport.Dispose();
+            transport = nextTransport;
+            transportMode = mode;
+            Plugin.Log.LogInfo("[InputLab] Transporte configurado: " + transport.Description);
+        }
+
+        public static void Shutdown()
+        {
+            Enabled = false;
+            transport.Dispose();
+        }
 
         public static void Tick()
         {
@@ -29,32 +56,40 @@ namespace Coophead
             if (!Enabled)
                 return;
 
-            EnsureMultiplayerState();
-            ReportPlayerTwoWhenReady();
+            if (DrivesPlayerTwo)
+            {
+                EnsureMultiplayerState();
+                ReportPlayerTwoWhenReady();
+            }
 
             sourceTick++;
-            var held = ReadButtons();
-            var sampled = new InputFrame
+            if (transportMode != InputTransportMode.LanHost)
             {
-                Tick = sourceTick,
-                Horizontal = ReadAxis(KeyCode.Keypad4, KeyCode.Keypad6),
-                Vertical = ReadAxis(KeyCode.Keypad2, KeyCode.Keypad8),
-                Held = held,
-                Pressed = held & ~previousHeld,
-                Released = previousHeld & ~held,
-            };
-            previousHeld = held;
-
-            transport.Send(sampled);
+                var held = ReadButtons();
+                var sampled = new InputFrame
+                {
+                    Tick = sourceTick,
+                    Horizontal = ReadAxis(KeyCode.Keypad4, KeyCode.Keypad6),
+                    Vertical = ReadAxis(KeyCode.Keypad2, KeyCode.Keypad8),
+                    Held = held,
+                    Pressed = held & ~previousHeld,
+                    Released = previousHeld & ~held,
+                };
+                previousHeld = held;
+                transport.Send(sampled);
+            }
 
             // Los bordes solo viven durante un tick receptor. Si un transporte no
             // entrega un frame nuevo, mantenemos ejes/botones pero no repetimos Down/Up.
             received.Pressed = InputButtons.None;
             received.Released = InputButtons.None;
 
-            InputFrame delivered;
-            while (transport.TryReceive(sourceTick, out delivered))
-                received = delivered;
+            if (transportMode != InputTransportMode.LanClient)
+            {
+                InputFrame delivered;
+                while (transport.TryReceive(sourceTick, out delivered))
+                    received = delivered;
+            }
 
         }
 
@@ -73,7 +108,7 @@ namespace Coophead
 
         public static void EnsureMultiplayerState()
         {
-            if (!Enabled)
+            if (!DrivesPlayerTwo)
                 return;
 
             try

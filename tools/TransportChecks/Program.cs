@@ -31,6 +31,48 @@ transport.Send(new InputFrame { Tick = 20 });
 transport.Send(new InputFrame { Tick = 21 });
 Assert(transport.TryReceive(24, out var first) && first.Tick == 20, "Se rompió el orden FIFO.");
 Assert(transport.TryReceive(24, out var second) && second.Tick == 21, "No se entregó el segundo frame.");
+transport.Dispose();
+
+var encoded = InputFramePacketCodec.Encode(sent);
+Assert(encoded.Length == InputFramePacketCodec.PacketSize, "El codec produjo un tamaño inesperado.");
+Assert(InputFramePacketCodec.TryDecode(encoded, out var decoded), "El codec rechazó un paquete válido.");
+Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
+    decoded.Vertical == sent.Vertical && decoded.Held == sent.Held,
+    "El codec alteró el InputFrame.");
+encoded[4]++;
+Assert(!InputFramePacketCodec.TryDecode(encoded, out _), "El codec aceptó otro protocolo.");
+
+var port = 32000 + Environment.ProcessId % 10000;
+using (var host = UdpInputTransport.CreateHost(port))
+using (var client = UdpInputTransport.CreateClient("127.0.0.1", port))
+{
+    client.Send(new InputFrame { Tick = 100, Horizontal = 127, Held = InputButtons.Shoot });
+    InputFrame networkFrame = default;
+    var arrived = false;
+    for (var attempt = 0; attempt < 100 && !arrived; attempt++)
+    {
+        arrived = host.TryReceive(0, out networkFrame);
+        if (!arrived)
+            Thread.Sleep(5);
+    }
+
+    Assert(arrived, "El datagrama UDP local no llegó.");
+    Assert(networkFrame.Tick == 100 && networkFrame.Horizontal == 127,
+        "UDP alteró el frame recibido.");
+    Assert(networkFrame.HasPressed(InputButtons.Shoot),
+        "UDP no reconstruyó el borde de pulsación.");
+
+    client.Send(new InputFrame { Tick = 101, Held = InputButtons.None });
+    arrived = false;
+    for (var attempt = 0; attempt < 100 && !arrived; attempt++)
+    {
+        arrived = host.TryReceive(0, out networkFrame);
+        if (!arrived)
+            Thread.Sleep(5);
+    }
+    Assert(arrived && networkFrame.HasReleased(InputButtons.Shoot),
+        "UDP no reconstruyó el borde de liberación.");
+}
 
 Console.WriteLine("TransportChecks: OK");
 return;

@@ -51,7 +51,7 @@ cargado` en `BepInEx/LogOutput.log`.
 
 ### Remote Input Lab
 
-La versión `0.2.0` puede crear y controlar localmente a Player Two sin un segundo
+La versión `0.3.0` puede crear y controlar localmente a Player Two sin un segundo
 mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
 Cuphead creará a ambos jugadores al cargar el mapa:
 
@@ -78,6 +78,10 @@ Las entradas pasan por un transporte loopback con tres frames de latencia simula
 El teclado produce `InputFrame`; los parches consumen únicamente frames entregados por
 el transporte. Así podremos cambiar loopback por LAN o Steam P2P sin reescribir la
 integración con el juego.
+
+También está disponible el primer transporte UDP para dos equipos en una red local.
+Consulta [docs/LAN_TEST.md](docs/LAN_TEST.md). Esta fase transmite entradas, pero aún
+no replica la escena ni el mundo en la pantalla del invitado.
 
 ## Alcance y límites
 

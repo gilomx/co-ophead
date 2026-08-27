@@ -20,6 +20,11 @@ namespace Coophead.Transport
             pending.Clear();
         }
 
+        public void Dispose()
+        {
+            pending.Clear();
+        }
+
         public void Send(InputFrame frame)
         {
             pending.Enqueue(new PendingFrame(frame.Tick + LatencyFrames, frame));

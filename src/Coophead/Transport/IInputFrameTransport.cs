@@ -1,6 +1,6 @@
 namespace Coophead.Transport
 {
-    internal interface IInputFrameTransport
+    internal interface IInputFrameTransport : System.IDisposable
     {
         string Description { get; }
         void Reset();
