@@ -51,6 +51,9 @@ para cargar mediante `SceneLoader`, pero no escribe mapa, victorias ni progreso 
 guardado local.
 El host refresca el contexto cada cinco segundos para que un cliente reconectado lo
 reciba; el sender oculta refrescos idénticos y solo imprime cambios reales.
+Además, el host envía snapshots de posición, vida y muerte de ambos jugadores veinte
+veces por segundo. En esta etapa son telemetría: el sender los muestra una vez por
+segundo y el cliente no corrige todavía su simulación local.
 
 ## Límites actuales
 

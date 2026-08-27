@@ -7,7 +7,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x000700;
+        private const uint ModVersionToken = 0x000800;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -82,6 +82,7 @@ namespace Coophead
             }
             ProcessSceneCommands();
             ProcessSessionContexts();
+            ProcessPlayerStates();
 
             if (DrivesPlayerTwo)
             {
@@ -92,6 +93,8 @@ namespace Coophead
             sourceTick++;
             if (transportMode == InputTransportMode.LanHost && sourceTick % 30 == 0)
                 CaptureAndSendContext();
+            if (transportMode == InputTransportMode.LanHost && sourceTick % 3 == 0)
+                CaptureAndSendPlayerState();
             if (transportMode != InputTransportMode.LanHost)
             {
                 var held = ReadButtons();
@@ -301,6 +304,50 @@ namespace Coophead
             return left.SaveSlot == right.SaveSlot && left.Flags == right.Flags &&
                 left.Difficulty == right.Difficulty && left.CurrentMap == right.CurrentMap &&
                 left.CurrentLevel == right.CurrentLevel;
+        }
+
+        private static void CaptureAndSendPlayerState()
+        {
+            var state = new PlayerStateSnapshot { Tick = sourceTick };
+            CapturePlayer(PlayerId.PlayerOne, 1, ref state);
+            CapturePlayer(PlayerId.PlayerTwo, 2, ref state);
+            if (state.PresentMask != 0)
+                transport.SendPlayerState(state);
+        }
+
+        private static void CapturePlayer(PlayerId id, byte mask, ref PlayerStateSnapshot state)
+        {
+            AbstractPlayerController player;
+            try { player = PlayerManager.GetPlayer(id); }
+            catch { return; }
+            if (player == null)
+                return;
+            state.PresentMask |= mask;
+            if (player.IsDead)
+                state.DeadMask |= mask;
+            var position = player.transform.position;
+            var health = player.stats == null ? 0 : player.stats.Health;
+            if (id == PlayerId.PlayerOne)
+            {
+                state.PlayerOneX = position.x; state.PlayerOneY = position.y;
+                state.PlayerOneHealth = (byte)Mathf.Clamp(health, 0, 255);
+            }
+            else
+            {
+                state.PlayerTwoX = position.x; state.PlayerTwoY = position.y;
+                state.PlayerTwoHealth = (byte)Mathf.Clamp(health, 0, 255);
+            }
+        }
+
+        private static void ProcessPlayerStates()
+        {
+            if (transportMode != InputTransportMode.LanClient)
+                return;
+            PlayerStateSnapshot state;
+            while (transport.TryReceivePlayerState(out state))
+            {
+                // Etapa de observación: recibir snapshots sin corregir aún la simulación local.
+            }
         }
 
         private static void ReportPlayerTwoWhenReady()

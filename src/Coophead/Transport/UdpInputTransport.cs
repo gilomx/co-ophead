@@ -17,6 +17,7 @@ namespace Coophead.Transport
         private readonly Queue<InputFrame> receivedFrames = new Queue<InputFrame>();
         private readonly Queue<SceneCommand> receivedScenes = new Queue<SceneCommand>();
         private readonly Queue<SessionContext> receivedContexts = new Queue<SessionContext>();
+        private readonly Queue<PlayerStateSnapshot> receivedPlayerStates = new Queue<PlayerStateSnapshot>();
         private readonly byte[] receiveBuffer = new byte[128];
         private EndPoint peer;
         private InputButtons lastReceivedHeld;
@@ -85,6 +86,7 @@ namespace Coophead.Transport
             receivedFrames.Clear();
             receivedScenes.Clear();
             receivedContexts.Clear();
+            receivedPlayerStates.Clear();
             lastReceivedHeld = InputButtons.None;
             lastReceivedTick = 0;
             PingMilliseconds = -1;
@@ -187,6 +189,23 @@ namespace Coophead.Transport
             return true;
         }
 
+        public void SendPlayerState(PlayerStateSnapshot state)
+        {
+            if (host && IsConnected)
+                SendPacket(LanPlayerStatePacketCodec.Encode(state), peer);
+        }
+
+        public bool TryReceivePlayerState(out PlayerStateSnapshot state)
+        {
+            if (host || receivedPlayerStates.Count == 0)
+            {
+                state = default(PlayerStateSnapshot);
+                return false;
+            }
+            state = receivedPlayerStates.Dequeue();
+            return true;
+        }
+
         public void Dispose()
         {
             socket.Close();
@@ -250,6 +269,18 @@ namespace Coophead.Transport
                         lastReceivedContextSequence = context.Sequence;
                         receivedContexts.Enqueue(context);
                     }
+                }
+                return;
+            }
+            PlayerStateSnapshot playerState;
+            if (LanPlayerStatePacketCodec.TryDecode(packet, out playerState))
+            {
+                if (!host && IsConnected && SameEndpoint(sender, peer))
+                {
+                    lastPacketReceivedUtc = now;
+                    while (receivedPlayerStates.Count > 0)
+                        receivedPlayerStates.Dequeue();
+                    receivedPlayerStates.Enqueue(playerState);
                 }
                 return;
             }
@@ -341,6 +372,7 @@ namespace Coophead.Transport
             receivedFrames.Clear();
             receivedScenes.Clear();
             receivedContexts.Clear();
+            receivedPlayerStates.Clear();
             PingMilliseconds = -1;
             Status = status;
         }

@@ -7,6 +7,7 @@ namespace Coophead.Transport
         private readonly Queue<PendingFrame> pending = new Queue<PendingFrame>();
         private readonly Queue<SceneCommand> scenes = new Queue<SceneCommand>();
         private readonly Queue<SessionContext> contexts = new Queue<SessionContext>();
+        private readonly Queue<PlayerStateSnapshot> playerStates = new Queue<PlayerStateSnapshot>();
 
         public LoopbackInputTransport(uint latencyFrames)
         {
@@ -29,6 +30,7 @@ namespace Coophead.Transport
             pending.Clear();
             scenes.Clear();
             contexts.Clear();
+            playerStates.Clear();
         }
 
         public void Dispose()
@@ -85,6 +87,14 @@ namespace Coophead.Transport
             }
             context = contexts.Dequeue();
             return true;
+        }
+
+        public void SendPlayerState(PlayerStateSnapshot state) { playerStates.Enqueue(state); }
+
+        public bool TryReceivePlayerState(out PlayerStateSnapshot state)
+        {
+            if (playerStates.Count == 0) { state = default(PlayerStateSnapshot); return false; }
+            state = playerStates.Dequeue(); return true;
         }
 
         private struct PendingFrame

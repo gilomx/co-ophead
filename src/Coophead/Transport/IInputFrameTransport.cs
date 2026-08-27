@@ -14,5 +14,7 @@ namespace Coophead.Transport
         bool TryReceiveScene(out SceneCommand command);
         void SendContext(SessionContext context);
         bool TryReceiveContext(out SessionContext context);
+        void SendPlayerState(PlayerStateSnapshot state);
+        bool TryReceivePlayerState(out PlayerStateSnapshot state);
     }
 }

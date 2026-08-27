@@ -145,6 +145,31 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         Thread.Sleep(5);
     }
     Assert(!client.TryReceiveContext(out _), "El cliente entregó un contexto duplicado.");
+
+    host.SendPlayerState(new PlayerStateSnapshot
+    {
+        Tick = 900,
+        PresentMask = 3,
+        DeadMask = 2,
+        PlayerOneX = 12.5f,
+        PlayerOneY = -8.25f,
+        PlayerTwoX = 44.75f,
+        PlayerTwoY = 16.5f,
+        PlayerOneHealth = 3,
+        PlayerTwoHealth = 0,
+    });
+    PlayerStateSnapshot receivedState = default;
+    var stateArrived = false;
+    for (var attempt = 0; attempt < 100 && !stateArrived; attempt++)
+    {
+        host.Update(); client.Update();
+        stateArrived = client.TryReceivePlayerState(out receivedState);
+        if (!stateArrived) Thread.Sleep(5);
+    }
+    Assert(stateArrived && receivedState.Tick == 900 && receivedState.PresentMask == 3 &&
+        receivedState.DeadMask == 2 && receivedState.PlayerOneX == 12.5f &&
+        receivedState.PlayerTwoY == 16.5f && receivedState.PlayerOneHealth == 3,
+        "El transporte alteró el snapshot de jugadores.");
 }
 
 var rejectPort = port + 1;

@@ -3,12 +3,12 @@ using System.Runtime.InteropServices;
 using Coophead;
 using Coophead.Transport;
 
-const uint VersionToken = 0x000700;
+const uint VersionToken = 0x000800;
 var host = args.Length > 0 ? args[0] : "127.0.0.1";
 var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 27182;
 
-Console.Title = "Co-ophead LAN Sender 0.7.0";
-Console.WriteLine("Co-ophead LAN Sender 0.7.0");
+Console.Title = "Co-ophead LAN Sender 0.8.0";
+Console.WriteLine("Co-ophead LAN Sender 0.8.0");
 Console.WriteLine($"Destino: {host}:{port}");
 Console.WriteLine("Mantén Cuphead enfocado. F7 cierra este sender.");
 Console.WriteLine();
@@ -22,6 +22,7 @@ var lastStatus = string.Empty;
 var lastPingPrintedUtc = DateTime.MinValue;
 var hasPrintedContext = false;
 var lastPrintedContext = default(SessionContext);
+var nextStatePrintAt = TimeSpan.Zero;
 uint tick = 0;
 
 while (!KeyDown(VirtualKey.F7))
@@ -51,6 +52,17 @@ while (!KeyDown(VirtualKey.F7))
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] contexto #{context.Sequence}: " +
                 $"slot={context.SaveSlot + 1}, lead={(context.PlayerOneIsMugman ? "Mugman" : "Cuphead")}, " +
                 $"difficulty={context.Difficulty}, map={context.CurrentMap}, level={context.CurrentLevel}");
+        }
+    }
+    PlayerStateSnapshot playerState;
+    while (transport.TryReceivePlayerState(out playerState))
+    {
+        if (stopwatch.Elapsed >= nextStatePrintAt)
+        {
+            Console.WriteLine($"[{stopwatch.Elapsed:mm\\:ss}] estado: " +
+                $"P1=({playerState.PlayerOneX:0.0},{playerState.PlayerOneY:0.0}) hp={playerState.PlayerOneHealth}; " +
+                $"P2=({playerState.PlayerTwoX:0.0},{playerState.PlayerTwoY:0.0}) hp={playerState.PlayerTwoHealth}");
+            nextStatePrintAt = stopwatch.Elapsed + TimeSpan.FromSeconds(1);
         }
     }
 
