@@ -7,7 +7,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x000900;
+        private const uint ModVersionToken = 0x001000;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -32,6 +32,24 @@ namespace Coophead
         private static bool IsClient => transportMode == InputTransportMode.LanClient ||
             transportMode == InputTransportMode.InternetClient;
         public static bool DrivesPlayerTwo => Enabled && !IsClient;
+        public static string TransportStatus => transport.Status;
+        public static string CurrentRoomCode
+        {
+            get
+            {
+                var relay = transport as RelayInputTransport;
+                return relay == null ? string.Empty : relay.RoomCode;
+            }
+        }
+
+        public static void StartInternet(bool host, string relayAddress, int relayPort, string roomCode)
+        {
+            if (!host && (roomCode == null || roomCode.Trim().Length != 6))
+                throw new System.ArgumentException("El código debe tener seis caracteres.");
+            Configure(host ? InputTransportMode.InternetHost : InputTransportMode.InternetClient,
+                "127.0.0.1", 27182, relayAddress, relayPort, roomCode);
+            SetEnabled(true);
+        }
 
         public static void Configure(InputTransportMode mode, string hostAddress, int port,
             string relayAddress, int relayPort, string roomCode)
