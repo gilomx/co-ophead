@@ -3,12 +3,12 @@ using System.Runtime.InteropServices;
 using Coophead;
 using Coophead.Transport;
 
-const uint VersionToken = 0x000800;
+const uint VersionToken = 0x000900;
 var host = args.Length > 0 ? args[0] : "127.0.0.1";
 var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 27182;
 
-Console.Title = "Co-ophead LAN Sender 0.8.0";
-Console.WriteLine("Co-ophead LAN Sender 0.8.0");
+Console.Title = "Co-ophead LAN Sender 0.9.0";
+Console.WriteLine("Co-ophead LAN Sender 0.9.0");
 Console.WriteLine($"Destino: {host}:{port}");
 Console.WriteLine("Mantén Cuphead enfocado. F7 cierra este sender.");
 Console.WriteLine();

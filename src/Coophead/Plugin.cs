@@ -12,7 +12,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.8.0";
+        public const string PluginVersion = "0.9.0";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
 
@@ -20,6 +20,9 @@ namespace Coophead
         private ConfigEntry<InputTransportMode> transportMode;
         private ConfigEntry<string> lanHostAddress;
         private ConfigEntry<int> lanPort;
+        private ConfigEntry<string> relayAddress;
+        private ConfigEntry<int> relayPort;
+        private ConfigEntry<string> roomCode;
 
         private void Awake()
         {
@@ -31,9 +34,16 @@ namespace Coophead
                 "IP del host usada por LanClient.");
             lanPort = Config.Bind("InputLab", "LanPort", 27182,
                 "Puerto UDP para los frames de entrada (1-65535).");
+            relayAddress = Config.Bind("Internet", "RelayAddress", "127.0.0.1",
+                "Servidor relay de Co-ophead.");
+            relayPort = Config.Bind("Internet", "RelayPort", 27183,
+                "Puerto TCP del relay.");
+            roomCode = Config.Bind("Internet", "RoomCode", "",
+                "Código para InternetClient; InternetHost genera uno.");
             try
             {
-                RemoteInputLab.Configure(transportMode.Value, lanHostAddress.Value, lanPort.Value);
+                RemoteInputLab.Configure(transportMode.Value, lanHostAddress.Value, lanPort.Value,
+                    relayAddress.Value, relayPort.Value, roomCode.Value);
             }
             catch (System.Exception ex)
             {

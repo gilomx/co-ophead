@@ -7,7 +7,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x000800;
+        private const uint ModVersionToken = 0x000900;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -27,9 +27,14 @@ namespace Coophead
         private static bool hasRemoteContext;
 
         public static bool Enabled { get; private set; }
-        public static bool DrivesPlayerTwo => Enabled && transportMode != InputTransportMode.LanClient;
+        private static bool IsHost => transportMode == InputTransportMode.LanHost ||
+            transportMode == InputTransportMode.InternetHost;
+        private static bool IsClient => transportMode == InputTransportMode.LanClient ||
+            transportMode == InputTransportMode.InternetClient;
+        public static bool DrivesPlayerTwo => Enabled && !IsClient;
 
-        public static void Configure(InputTransportMode mode, string hostAddress, int port)
+        public static void Configure(InputTransportMode mode, string hostAddress, int port,
+            string relayAddress, int relayPort, string roomCode)
         {
             if (port < 1 || port > 65535)
                 throw new System.ArgumentOutOfRangeException("port", "LanPort debe estar entre 1 y 65535.");
@@ -39,6 +44,10 @@ namespace Coophead
                 nextTransport = UdpInputTransport.CreateHost(port, ModVersionToken);
             else if (mode == InputTransportMode.LanClient)
                 nextTransport = UdpInputTransport.CreateClient(hostAddress, port, ModVersionToken);
+            else if (mode == InputTransportMode.InternetHost)
+                nextTransport = new RelayInputTransport(relayAddress, relayPort, true, string.Empty);
+            else if (mode == InputTransportMode.InternetClient)
+                nextTransport = new RelayInputTransport(relayAddress, relayPort, false, roomCode);
             else
                 nextTransport = new LoopbackInputTransport(SimulatedLatencyFrames);
 
@@ -91,11 +100,11 @@ namespace Coophead
             }
 
             sourceTick++;
-            if (transportMode == InputTransportMode.LanHost && sourceTick % 30 == 0)
+            if (IsHost && sourceTick % 30 == 0)
                 CaptureAndSendContext();
-            if (transportMode == InputTransportMode.LanHost && sourceTick % 3 == 0)
+            if (IsHost && sourceTick % 3 == 0)
                 CaptureAndSendPlayerState();
-            if (transportMode != InputTransportMode.LanHost)
+            if (!IsHost)
             {
                 var held = ReadButtons();
                 var sampled = new InputFrame
@@ -116,7 +125,7 @@ namespace Coophead
             received.Pressed = InputButtons.None;
             received.Released = InputButtons.None;
 
-            if (transportMode != InputTransportMode.LanClient)
+            if (!IsClient)
             {
                 InputFrame delivered;
                 while (transport.TryReceive(sourceTick, out delivered))
@@ -160,7 +169,7 @@ namespace Coophead
 
         public static void OnSceneLoaded(string sceneName, LoadSceneMode mode)
         {
-            if (transportMode != InputTransportMode.LanHost || !IsStableScene(sceneName, mode))
+            if (!IsHost || !IsStableScene(sceneName, mode))
                 return;
 
             transport.SendScene(new SceneCommand
@@ -173,7 +182,7 @@ namespace Coophead
 
         private static void ProcessSceneCommands()
         {
-            if (transportMode != InputTransportMode.LanClient)
+            if (!IsClient)
                 return;
 
             SceneCommand command;
@@ -272,7 +281,7 @@ namespace Coophead
 
         private static void ProcessSessionContexts()
         {
-            if (transportMode != InputTransportMode.LanClient)
+            if (!IsClient)
                 return;
 
             SessionContext context;
@@ -341,7 +350,7 @@ namespace Coophead
 
         private static void ProcessPlayerStates()
         {
-            if (transportMode != InputTransportMode.LanClient)
+            if (!IsClient)
                 return;
             PlayerStateSnapshot state;
             while (transport.TryReceivePlayerState(out state))

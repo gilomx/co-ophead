@@ -5,5 +5,7 @@ namespace Coophead.Transport
         Loopback,
         LanHost,
         LanClient,
+        InternetHost,
+        InternetClient,
     }
 }

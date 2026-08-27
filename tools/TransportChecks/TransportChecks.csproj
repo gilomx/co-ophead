@@ -19,5 +19,6 @@
     <Compile Include="..\..\src\Coophead\Transport\LanPlayerStatePacketCodec.cs" Link="LanPlayerStatePacketCodec.cs" />
     <Compile Include="..\..\src\Coophead\Transport\LoopbackInputTransport.cs" Link="LoopbackInputTransport.cs" />
     <Compile Include="..\..\src\Coophead\Transport\UdpInputTransport.cs" Link="UdpInputTransport.cs" />
+    <Compile Include="..\..\src\Coophead\Transport\RelayInputTransport.cs" Link="RelayInputTransport.cs" />
   </ItemGroup>
 </Project>

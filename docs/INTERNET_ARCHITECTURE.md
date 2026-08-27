@@ -16,3 +16,12 @@ El servidor inicial está en `server/Coophead.Relay`. Se prueba con:
 ```powershell
 dotnet run --project .\server\Coophead.Relay -- --self-test
 ```
+
+## Integración actual del mod
+
+`InputLab.Transport` acepta `InternetHost` e `InternetClient`. Ambos usan
+`Internet.RelayAddress` y `Internet.RelayPort`; el invitado añade el código en
+`Internet.RoomCode`. El host muestra el código generado en `BepInEx/LogOutput.log`.
+
+Esta configuración sirve para desarrollo local. La experiencia final expondrá crear
+y unirse dentro del juego y utilizará una dirección de relay incluida en el mod.

@@ -186,7 +186,40 @@ using (var incompatibleClient = UdpInputTransport.CreateClient("127.0.0.1", reje
     }
     Assert(!host.IsConnected && !incompatibleClient.IsConnected,
         "Se conectaron versiones incompatibles.");
-    Assert(host.Status.Contains("incompatible"), "El host no informó el rechazo de versión.");
+Assert(host.Status.Contains("incompatible"), "El host no informó el rechazo de versión.");
+}
+
+var relayPortListener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+relayPortListener.Start();
+var relayPort = ((System.Net.IPEndPoint)relayPortListener.LocalEndpoint).Port;
+relayPortListener.Stop();
+var relayDll = Path.GetFullPath("server/Coophead.Relay/bin/Debug/net8.0/Coophead.Relay.dll");
+using (var relayProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+{
+    FileName = "dotnet",
+    Arguments = $"\"{relayDll}\" --port={relayPort}",
+    UseShellExecute = false,
+    CreateNoWindow = true,
+}))
+{
+    Thread.Sleep(150);
+    using var internetHost = new RelayInputTransport("127.0.0.1", relayPort, true, "");
+    for (var attempt = 0; attempt < 200 && internetHost.RoomCode.Length != 6; attempt++)
+    { internetHost.Update(); Thread.Sleep(5); }
+    Assert(internetHost.RoomCode.Length == 6, "El relay no entregó código de sala.");
+    using var internetClient = new RelayInputTransport("127.0.0.1", relayPort, false, internetHost.RoomCode);
+    for (var attempt = 0; attempt < 200 && (!internetHost.IsConnected || !internetClient.IsConnected); attempt++)
+    { internetHost.Update(); internetClient.Update(); Thread.Sleep(5); }
+    Assert(internetHost.IsConnected && internetClient.IsConnected, "Los clientes no se unieron a la sala.");
+    internetClient.Send(new InputFrame { Tick = 77, Horizontal = 127, Held = InputButtons.Jump });
+    InputFrame relayFrame = default;
+    var relayFrameArrived = false;
+    for (var attempt = 0; attempt < 200 && !relayFrameArrived; attempt++)
+    { internetClient.Update(); internetHost.Update(); relayFrameArrived = internetHost.TryReceive(0, out relayFrame); Thread.Sleep(5); }
+    Assert(relayFrameArrived && relayFrame.Tick == 77 && relayFrame.Horizontal == 127 &&
+        relayFrame.HasHeld(InputButtons.Jump), "El relay alteró el frame de entrada.");
+    relayProcess.Kill(true);
+    relayProcess.WaitForExit();
 }
 
 Console.WriteLine("TransportChecks: OK");
