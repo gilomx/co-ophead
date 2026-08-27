@@ -2,6 +2,18 @@
 
 El usuario instala únicamente Co-ophead. No abre puertos ni instala una VPN.
 
+## Ruta principal sin costo operativo
+
+1. Cada cliente consulta STUN desde el mismo socket UDP que usará para jugar.
+2. `Coophead.Signaling` intercambia los endpoints mediante un código efímero.
+3. Ambos clientes envían probes UDP simultáneos para abrir el NAT.
+4. Si se confirma el handshake, todo el gameplay viaja directamente PC a PC.
+
+El servicio de señalización se diseñó para Cloudflare Workers Free y no transporta
+frames. Sin relay, NAT simétrico y algunas redes con CGNAT pueden impedir la conexión.
+
+## Relay opcional
+
 1. El host abre una conexión TCP saliente al relay y recibe un código de seis caracteres.
 2. El invitado abre otra conexión saliente y presenta ese código.
 3. El relay une ambas conexiones y reenvía frames binarios opacos.

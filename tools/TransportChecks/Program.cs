@@ -42,6 +42,25 @@ Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
 encoded[4]++;
 Assert(!InputFramePacketCodec.TryDecode(encoded, out _), "El codec aceptó otro protocolo.");
 
+var stunTransaction = Enumerable.Range(1, 12).Select(x => (byte)x).ToArray();
+var stunRequest = StunPacketCodec.CreateBindingRequest(stunTransaction);
+Assert(stunRequest.Length == 20 && stunRequest[0] == 0 && stunRequest[1] == 1,
+    "La solicitud STUN no tiene formato Binding Request.");
+var stunResponse = new byte[32];
+stunResponse[0] = 0x01; stunResponse[1] = 0x01; stunResponse[3] = 12;
+stunResponse[4] = 0x21; stunResponse[5] = 0x12; stunResponse[6] = 0xA4; stunResponse[7] = 0x42;
+Buffer.BlockCopy(stunTransaction, 0, stunResponse, 8, 12);
+stunResponse[20] = 0; stunResponse[21] = 0x20; stunResponse[23] = 8; stunResponse[25] = 1;
+var expectedPort = 45678; var xorPort = expectedPort ^ 0x2112;
+stunResponse[26] = (byte)(xorPort >> 8); stunResponse[27] = (byte)xorPort;
+var expectedAddress = new byte[] { 203, 0, 113, 42 };
+var cookie = new byte[] { 0x21, 0x12, 0xA4, 0x42 };
+for (var i = 0; i < 4; i++) stunResponse[28 + i] = (byte)(expectedAddress[i] ^ cookie[i]);
+System.Net.IPEndPoint stunEndpoint;
+Assert(StunPacketCodec.TryReadBindingResponse(stunResponse, stunTransaction, out stunEndpoint) &&
+    stunEndpoint.Port == expectedPort && stunEndpoint.Address.Equals(new System.Net.IPAddress(expectedAddress)),
+    "No se decodificó XOR-MAPPED-ADDRESS de STUN.");
+
 const uint versionToken = 0x000600;
 var port = 32000 + Environment.ProcessId % 10000;
 using (var host = UdpInputTransport.CreateHost(port, versionToken, System.Net.IPAddress.Loopback))

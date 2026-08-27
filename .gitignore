@@ -14,6 +14,8 @@ BepInEx/
 Directory.Build.props.user
 Directory.Build.props
 local.settings.json
+node_modules/
+.wrangler/
 
 # Repositorios externos usados solo como referencia local
 .reference/
