@@ -42,15 +42,27 @@ Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
 encoded[4]++;
 Assert(!InputFramePacketCodec.TryDecode(encoded, out _), "El codec aceptó otro protocolo.");
 
+const uint versionToken = 0x000400;
 var port = 32000 + Environment.ProcessId % 10000;
-using (var host = UdpInputTransport.CreateHost(port))
-using (var client = UdpInputTransport.CreateClient("127.0.0.1", port))
+using (var host = UdpInputTransport.CreateHost(port, versionToken, System.Net.IPAddress.Loopback))
+using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionToken))
 {
+    for (var attempt = 0; attempt < 400 && (!host.IsConnected || !client.IsConnected); attempt++)
+    {
+        client.Update();
+        host.Update();
+        client.Update();
+        if (!host.IsConnected || !client.IsConnected)
+            Thread.Sleep(5);
+    }
+    Assert(host.IsConnected && client.IsConnected, "El handshake UDP no se completó.");
+
     client.Send(new InputFrame { Tick = 100, Horizontal = 127, Held = InputButtons.Shoot });
     InputFrame networkFrame = default;
     var arrived = false;
     for (var attempt = 0; attempt < 100 && !arrived; attempt++)
     {
+        host.Update();
         arrived = host.TryReceive(0, out networkFrame);
         if (!arrived)
             Thread.Sleep(5);
@@ -66,12 +78,30 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port))
     arrived = false;
     for (var attempt = 0; attempt < 100 && !arrived; attempt++)
     {
+        host.Update();
         arrived = host.TryReceive(0, out networkFrame);
         if (!arrived)
             Thread.Sleep(5);
     }
     Assert(arrived && networkFrame.HasReleased(InputButtons.Shoot),
         "UDP no reconstruyó el borde de liberación.");
+}
+
+var rejectPort = port + 1;
+using (var host = UdpInputTransport.CreateHost(rejectPort, versionToken, System.Net.IPAddress.Loopback))
+using (var incompatibleClient = UdpInputTransport.CreateClient("127.0.0.1", rejectPort, 0x000399))
+{
+    for (var attempt = 0; attempt < 400 && !host.Status.Contains("incompatible"); attempt++)
+    {
+        incompatibleClient.Update();
+        host.Update();
+        incompatibleClient.Update();
+        if (!host.Status.Contains("incompatible"))
+            Thread.Sleep(5);
+    }
+    Assert(!host.IsConnected && !incompatibleClient.IsConnected,
+        "Se conectaron versiones incompatibles.");
+    Assert(host.Status.Contains("incompatible"), "El host no informó el rechazo de versión.");
 }
 
 Console.WriteLine("TransportChecks: OK");

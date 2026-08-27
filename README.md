@@ -51,7 +51,7 @@ cargado` en `BepInEx/LogOutput.log`.
 
 ### Remote Input Lab
 
-La versión `0.3.0` puede crear y controlar localmente a Player Two sin un segundo
+La versión `0.4.0` puede crear y controlar localmente a Player Two sin un segundo
 mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
 Cuphead creará a ambos jugadores al cargar el mapa:
 

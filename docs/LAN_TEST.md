@@ -5,6 +5,8 @@ escenas, guardado, enemigos ni progreso. El host ejecuta la partida; el cliente 
 permanecer en el título mientras envía el teclado numérico.
 
 Ambos equipos necesitan la misma versión de Cuphead, BepInEx 5 y `Coophead.dll`.
+Antes de aceptar entradas, intercambian versión de mod/protocolo. Una combinación
+incompatible se rechaza y queda registrada claramente en ambos logs.
 
 ## Host
 
@@ -49,3 +51,5 @@ todavía no verá la partida del host; esa será la siguiente fase de sincroniza
 - Cada paquete contiene un frame; el estado mantenido del siguiente paquete repara
   liberaciones perdidas, pero aún no hay métricas de pérdida ni jitter buffer.
 - El puerto no debe exponerse directamente a Internet.
+- Hay ping periódico y timeout de cinco segundos; una desconexión vuelve al estado de
+  espera/búsqueda sin reiniciar el juego.

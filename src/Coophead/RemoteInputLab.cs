@@ -6,6 +6,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
+        private const uint ModVersionToken = 0x000400;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -16,6 +17,7 @@ namespace Coophead
         private static bool playerTwoReported;
         private static bool rewiredReadReported;
         private static uint sourceTick;
+        private static string lastTransportStatus;
 
         public static bool Enabled { get; private set; }
         public static bool DrivesPlayerTwo => Enabled && transportMode != InputTransportMode.LanClient;
@@ -27,9 +29,9 @@ namespace Coophead
 
             IInputFrameTransport nextTransport;
             if (mode == InputTransportMode.LanHost)
-                nextTransport = UdpInputTransport.CreateHost(port);
+                nextTransport = UdpInputTransport.CreateHost(port, ModVersionToken);
             else if (mode == InputTransportMode.LanClient)
-                nextTransport = UdpInputTransport.CreateClient(hostAddress, port);
+                nextTransport = UdpInputTransport.CreateClient(hostAddress, port, ModVersionToken);
             else
                 nextTransport = new LoopbackInputTransport(SimulatedLatencyFrames);
 
@@ -55,6 +57,13 @@ namespace Coophead
 
             if (!Enabled)
                 return;
+
+            transport.Update();
+            if (lastTransportStatus != transport.Status)
+            {
+                lastTransportStatus = transport.Status;
+                Plugin.Log.LogMessage("[InputLab] " + transport.Status);
+            }
 
             if (DrivesPlayerTwo)
             {
@@ -102,6 +111,7 @@ namespace Coophead
             transport.Reset();
             playerTwoReported = false;
             rewiredReadReported = false;
+            lastTransportStatus = null;
             Plugin.Log.LogMessage("Remote Input Lab " + (Enabled ? "ACTIVADO" : "DESACTIVADO") +
                 (Enabled ? " (" + transport.Description + ")." : "."));
         }

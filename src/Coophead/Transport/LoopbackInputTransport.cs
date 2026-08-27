@@ -14,6 +14,13 @@ namespace Coophead.Transport
         public uint LatencyFrames { get; }
 
         public string Description => "loopback, " + LatencyFrames + " frames de latencia";
+        public string Status => "conectado";
+        public bool IsConnected => true;
+        public int PingMilliseconds => 0;
+
+        public void Update()
+        {
+        }
 
         public void Reset()
         {

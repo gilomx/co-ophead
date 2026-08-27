@@ -10,6 +10,7 @@
     <Compile Include="..\..\src\Coophead\InputFrame.cs" Link="InputFrame.cs" />
     <Compile Include="..\..\src\Coophead\Transport\IInputFrameTransport.cs" Link="IInputFrameTransport.cs" />
     <Compile Include="..\..\src\Coophead\Transport\InputFramePacketCodec.cs" Link="InputFramePacketCodec.cs" />
+    <Compile Include="..\..\src\Coophead\Transport\LanControlPacketCodec.cs" Link="LanControlPacketCodec.cs" />
     <Compile Include="..\..\src\Coophead\Transport\LoopbackInputTransport.cs" Link="LoopbackInputTransport.cs" />
     <Compile Include="..\..\src\Coophead\Transport\UdpInputTransport.cs" Link="UdpInputTransport.cs" />
   </ItemGroup>
