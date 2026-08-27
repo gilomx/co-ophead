@@ -1,0 +1,16 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Referencias locales al juego y artefactos que nunca deben versionarse
+lib/game/
+game/
+BepInEx/
+*.log
+
+# Configuración local
+Directory.Build.props.user
+Directory.Build.props
+local.settings.json

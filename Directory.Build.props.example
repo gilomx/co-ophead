@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Copia este archivo como Directory.Build.props si Cuphead está en otra ruta. -->
+    <CUPHEAD_PATH>E:\SteamLibrary\steamapps\common\Cuphead</CUPHEAD_PATH>
+  </PropertyGroup>
+</Project>
