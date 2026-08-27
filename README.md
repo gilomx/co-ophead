@@ -45,7 +45,7 @@ En otra instalación se puede definir `CUPHEAD_PATH` como propiedad de MSBuild o
 `Directory.Build.props.example` a `Directory.Build.props` y editarla.
 
 Para probar manualmente, copia `src/Coophead/bin/Debug/net35/Coophead.dll` a
-`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.1.0-dev
+`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.1.0
 cargado` en `BepInEx/LogOutput.log`.
 
 ## Alcance y límites

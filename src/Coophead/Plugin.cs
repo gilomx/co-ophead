@@ -9,7 +9,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.1.0-dev";
+        public const string PluginVersion = "0.1.0";
 
         private void Awake()
         {
