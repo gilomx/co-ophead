@@ -4,6 +4,23 @@ Experimento de multijugador cooperativo nativo para **Cuphead en Windows/Steam**
 En lugar de transmitir video como Steam Remote Play, cada equipo ejecuta su propia
 copia del juego y el mod intercambia entradas y una cantidad pequeña de estado.
 
+## Descargar la prueba 0.11.0
+
+**[Descargar Co-ophead 0.11.0 para Windows x64](https://github.com/gilomx/co-ophead/raw/refs/heads/main/releases/Coophead-0.11.0-Windows-x64.zip)**
+
+Es un paquete universal: el host y el invitado instalan exactamente el mismo ZIP.
+Ya incluye BepInEx 5.4.23.4, Co-ophead y la configuración P2P; no requiere VPN,
+abrir puertos ni instalar programas adicionales.
+
+1. Cada jugador extrae el contenido del ZIP en la carpeta que contiene `Cuphead.exe`.
+2. Ambos abren Cuphead y pulsan `F6`.
+3. Uno selecciona **Crear partida** y comparte el código de seis caracteres.
+4. El otro escribe el código y selecciona **Unirse**.
+
+Esta es una compilación preliminar. La conexión es directa entre ambos equipos y
+puede fallar cuando alguna red usa NAT simétrico o CGNAT; todavía no hay relay de
+respaldo porque el objetivo actual es mantener el servicio sin costo.
+
 ## Objetivo inicial
 
 Conseguir que dos computadoras ejecuten una partida vanilla de dos jugadores:
@@ -32,8 +49,8 @@ La superficie de integración confirmada está en [docs/GAME_API.md](docs/GAME_A
 
 ## Estado
 
-Fase 0 en curso: el plugin mínimo vive en `src/Coophead`, registra su versión y cada
-escena cargada en `BepInEx/LogOutput.log`.
+Prueba P2P 0.11.0 en curso: el plugin puede crear salas mediante señalización web,
+descubrir los endpoints con STUN y abrir una conexión UDP directa entre dos redes.
 
 ### Compilar
 
