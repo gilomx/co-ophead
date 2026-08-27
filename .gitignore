@@ -16,6 +16,7 @@ Directory.Build.props
 local.settings.json
 node_modules/
 .wrangler/
+dist/
 
 # Repositorios externos usados solo como referencia local
 .reference/
