@@ -10,5 +10,7 @@ namespace Coophead.Transport
         void Update();
         void Send(InputFrame frame);
         bool TryReceive(uint receiverTick, out InputFrame frame);
+        void SendScene(SceneCommand command);
+        bool TryReceiveScene(out SceneCommand command);
     }
 }

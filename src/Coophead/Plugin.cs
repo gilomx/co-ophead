@@ -12,7 +12,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.4.0";
+        public const string PluginVersion = "0.5.0";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
 
@@ -52,6 +52,7 @@ namespace Coophead
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
             Logger.LogInfo("Escena cargada: " + scene.name + " (" + mode + ")");
+            RemoteInputLab.OnSceneLoaded(scene.name, mode);
         }
 
         private void OnDestroy()

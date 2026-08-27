@@ -42,7 +42,7 @@ Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
 encoded[4]++;
 Assert(!InputFramePacketCodec.TryDecode(encoded, out _), "El codec aceptó otro protocolo.");
 
-const uint versionToken = 0x000400;
+const uint versionToken = 0x000500;
 var port = 32000 + Environment.ProcessId % 10000;
 using (var host = UdpInputTransport.CreateHost(port, versionToken, System.Net.IPAddress.Loopback))
 using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionToken))
@@ -85,6 +85,31 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     }
     Assert(arrived && networkFrame.HasReleased(InputButtons.Shoot),
         "UDP no reconstruyó el borde de liberación.");
+
+    host.SendScene(new SceneCommand { SceneName = "scene_map_world_1", LoadMode = 0 });
+    SceneCommand receivedScene = default;
+    var sceneArrived = false;
+    for (var attempt = 0; attempt < 200 && !sceneArrived; attempt++)
+    {
+        host.Update();
+        client.Update();
+        host.Update();
+        sceneArrived = client.TryReceiveScene(out receivedScene);
+        if (!sceneArrived)
+            Thread.Sleep(5);
+    }
+    Assert(sceneArrived && receivedScene.SceneName == "scene_map_world_1",
+        "El comando fiable de escena no llegó.");
+    Assert(receivedScene.Sequence != 0, "La escena llegó sin secuencia.");
+
+    for (var attempt = 0; attempt < 80; attempt++)
+    {
+        host.Update();
+        client.Update();
+        host.Update();
+        Thread.Sleep(5);
+    }
+    Assert(!client.TryReceiveScene(out _), "El cliente entregó una escena duplicada.");
 }
 
 var rejectPort = port + 1;

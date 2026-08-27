@@ -53,6 +53,8 @@ todavía no verá la partida del host; esa será la siguiente fase de sincroniza
 - El puerto no debe exponerse directamente a Internet.
 - Hay ping periódico y timeout de cinco segundos; una desconexión vuelve al estado de
   espera/búsqueda sin reiniciar el juego.
+- El sender de desarrollo resume el ping cada cinco segundos para mantener legible la
+  secuencia de conexión y escenas.
 - En modo LAN, Co-ophead habilita la actualización de Unity en segundo plano para que
   el handshake no expire al cambiar el foco entre Cuphead y herramientas de prueba.
 

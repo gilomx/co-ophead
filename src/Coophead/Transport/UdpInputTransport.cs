@@ -8,19 +8,26 @@ namespace Coophead.Transport
     internal sealed class UdpInputTransport : IInputFrameTransport
     {
         private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(1);
+        private static readonly TimeSpan ReliableRetryInterval = TimeSpan.FromMilliseconds(300);
         private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
         private readonly Socket socket;
         private readonly bool host;
         private readonly EndPoint configuredTarget;
         private readonly uint versionToken;
         private readonly Queue<InputFrame> receivedFrames = new Queue<InputFrame>();
-        private readonly byte[] receiveBuffer = new byte[InputFramePacketCodec.PacketSize];
+        private readonly Queue<SceneCommand> receivedScenes = new Queue<SceneCommand>();
+        private readonly byte[] receiveBuffer = new byte[128];
         private EndPoint peer;
         private InputButtons lastReceivedHeld;
         private uint lastReceivedTick;
         private DateTime lastHelloSentUtc;
         private DateTime lastPingSentUtc;
         private DateTime lastPacketReceivedUtc;
+        private DateTime lastSceneSentUtc;
+        private SceneCommand pendingScene;
+        private bool hasPendingScene;
+        private uint nextSceneSequence = 1;
+        private uint lastReceivedSceneSequence;
 
         private UdpInputTransport(Socket socket, bool host, EndPoint target,
             string description, uint versionToken)
@@ -70,9 +77,11 @@ namespace Coophead.Transport
         public void Reset()
         {
             receivedFrames.Clear();
+            receivedScenes.Clear();
             lastReceivedHeld = InputButtons.None;
             lastReceivedTick = 0;
             PingMilliseconds = -1;
+            lastReceivedSceneSequence = 0;
             DrainSocket();
         }
 
@@ -93,6 +102,12 @@ namespace Coophead.Transport
                 SendControl(LanControlPacketCodec.Ping, unchecked((uint)Environment.TickCount), peer);
                 lastPingSentUtc = now;
             }
+            if (host && IsConnected && hasPendingScene &&
+                now - lastSceneSentUtc >= ReliableRetryInterval)
+            {
+                SendPacket(LanScenePacketCodec.Encode(pendingScene), peer);
+                lastSceneSentUtc = now;
+            }
         }
 
         public void Send(InputFrame frame)
@@ -109,6 +124,29 @@ namespace Coophead.Transport
                 return false;
             }
             frame = receivedFrames.Dequeue();
+            return true;
+        }
+
+        public void SendScene(SceneCommand command)
+        {
+            if (!host)
+                return;
+            command.Sequence = nextSceneSequence++;
+            if (nextSceneSequence == 0)
+                nextSceneSequence = 1;
+            pendingScene = command;
+            hasPendingScene = true;
+            lastSceneSentUtc = DateTime.MinValue;
+        }
+
+        public bool TryReceiveScene(out SceneCommand command)
+        {
+            if (host || receivedScenes.Count == 0)
+            {
+                command = default(SceneCommand);
+                return false;
+            }
+            command = receivedScenes.Dequeue();
             return true;
         }
 
@@ -148,6 +186,21 @@ namespace Coophead.Transport
                 HandleControl(type, value, sender, now);
                 return;
             }
+            SceneCommand sceneCommand;
+            if (LanScenePacketCodec.TryDecode(packet, out sceneCommand))
+            {
+                if (!host && IsConnected && SameEndpoint(sender, peer))
+                {
+                    lastPacketReceivedUtc = now;
+                    SendControl(LanControlPacketCodec.SceneAck, sceneCommand.Sequence, peer);
+                    if (sceneCommand.Sequence > lastReceivedSceneSequence)
+                    {
+                        lastReceivedSceneSequence = sceneCommand.Sequence;
+                        receivedScenes.Enqueue(sceneCommand);
+                    }
+                }
+                return;
+            }
             if (!host || !IsConnected || !SameEndpoint(sender, peer))
                 return;
             InputFrame frame;
@@ -178,6 +231,7 @@ namespace Coophead.Transport
                 lastPacketReceivedUtc = now;
                 Status = "cliente conectado: " + sender;
                 SendControl(LanControlPacketCodec.HelloAck, versionToken, peer);
+                lastSceneSentUtc = DateTime.MinValue;
                 return;
             }
             if (!host && type == LanControlPacketCodec.HelloAck && value == versionToken &&
@@ -207,7 +261,14 @@ namespace Coophead.Transport
                 PingMilliseconds = unchecked(Environment.TickCount - (int)value);
                 if (PingMilliseconds < 0)
                     PingMilliseconds = 0;
-                Status = "conectado al host; ping " + PingMilliseconds + " ms";
+                Status = "conectado al host";
+                return;
+            }
+            if (host && IsConnected && type == LanControlPacketCodec.SceneAck &&
+                SameEndpoint(sender, peer) && hasPendingScene && value == pendingScene.Sequence)
+            {
+                lastPacketReceivedUtc = now;
+                hasPendingScene = false;
             }
         }
 
@@ -218,6 +279,7 @@ namespace Coophead.Transport
             lastReceivedHeld = InputButtons.None;
             lastReceivedTick = 0;
             receivedFrames.Clear();
+            receivedScenes.Clear();
             PingMilliseconds = -1;
             Status = status;
         }

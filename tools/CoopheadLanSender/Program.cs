@@ -3,12 +3,12 @@ using System.Runtime.InteropServices;
 using Coophead;
 using Coophead.Transport;
 
-const uint VersionToken = 0x000400;
+const uint VersionToken = 0x000500;
 var host = args.Length > 0 ? args[0] : "127.0.0.1";
 var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 27182;
 
-Console.Title = "Co-ophead LAN Sender 0.4.0";
-Console.WriteLine("Co-ophead LAN Sender 0.4.0");
+Console.Title = "Co-ophead LAN Sender 0.5.0";
+Console.WriteLine("Co-ophead LAN Sender 0.5.0");
 Console.WriteLine($"Destino: {host}:{port}");
 Console.WriteLine("Mantén Cuphead enfocado. F7 cierra este sender.");
 Console.WriteLine();
@@ -19,6 +19,7 @@ var nextFrameAt = stopwatch.Elapsed;
 var frameInterval = TimeSpan.FromSeconds(1.0 / 60.0);
 var previousHeld = InputButtons.None;
 var lastStatus = string.Empty;
+var lastPingPrintedUtc = DateTime.MinValue;
 uint tick = 0;
 
 while (!KeyDown(VirtualKey.F7))
@@ -29,6 +30,15 @@ while (!KeyDown(VirtualKey.F7))
         lastStatus = transport.Status;
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {lastStatus}");
     }
+    if (transport.IsConnected && transport.PingMilliseconds >= 0 &&
+        DateTime.UtcNow - lastPingPrintedUtc >= TimeSpan.FromSeconds(5))
+    {
+        lastPingPrintedUtc = DateTime.UtcNow;
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ping {transport.PingMilliseconds} ms");
+    }
+    SceneCommand scene;
+    while (transport.TryReceiveScene(out scene))
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] escena #{scene.Sequence}: {scene.SceneName}");
 
     if (stopwatch.Elapsed >= nextFrameAt)
     {

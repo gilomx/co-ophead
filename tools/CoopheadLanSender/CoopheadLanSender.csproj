@@ -12,6 +12,8 @@
     <Compile Include="..\..\src\Coophead\Transport\IInputFrameTransport.cs" Link="IInputFrameTransport.cs" />
     <Compile Include="..\..\src\Coophead\Transport\InputFramePacketCodec.cs" Link="InputFramePacketCodec.cs" />
     <Compile Include="..\..\src\Coophead\Transport\LanControlPacketCodec.cs" Link="LanControlPacketCodec.cs" />
+    <Compile Include="..\..\src\Coophead\Transport\LanScenePacketCodec.cs" Link="LanScenePacketCodec.cs" />
+    <Compile Include="..\..\src\Coophead\Transport\SceneCommand.cs" Link="SceneCommand.cs" />
     <Compile Include="..\..\src\Coophead\Transport\UdpInputTransport.cs" Link="UdpInputTransport.cs" />
   </ItemGroup>
 </Project>

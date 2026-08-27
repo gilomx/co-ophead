@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using Coophead.Transport;
 
 namespace Coophead
@@ -6,7 +7,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x000400;
+        private const uint ModVersionToken = 0x000500;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -75,6 +76,7 @@ namespace Coophead
                 lastTransportStatus = transport.Status;
                 Plugin.Log.LogMessage("[InputLab] " + transport.Status);
             }
+            ProcessSceneCommands();
 
             if (DrivesPlayerTwo)
             {
@@ -143,6 +145,53 @@ namespace Coophead
             {
                 // PlayerManager todavía no existe durante los primeros frames de arranque.
             }
+        }
+
+        public static void OnSceneLoaded(string sceneName, LoadSceneMode mode)
+        {
+            if (transportMode != InputTransportMode.LanHost || !IsStableScene(sceneName, mode))
+                return;
+
+            transport.SendScene(new SceneCommand
+            {
+                SceneName = sceneName,
+                LoadMode = (byte)mode,
+            });
+            Plugin.Log.LogInfo("[SceneSync] Escena encolada: " + sceneName);
+        }
+
+        private static void ProcessSceneCommands()
+        {
+            if (transportMode != InputTransportMode.LanClient)
+                return;
+
+            SceneCommand command;
+            while (transport.TryReceiveScene(out command))
+            {
+                Plugin.Log.LogMessage("[SceneSync] Escena recibida: " + command.SceneName +
+                    " #" + command.Sequence);
+                if (!IsStableScene(command.SceneName, (LoadSceneMode)command.LoadMode))
+                    continue;
+                if (SceneManager.GetActiveScene().name == command.SceneName)
+                    continue;
+
+                try
+                {
+                    SceneManager.LoadScene(command.SceneName, LoadSceneMode.Single);
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning("[SceneSync] No se pudo cargar " + command.SceneName +
+                        ": " + ex.Message);
+                }
+            }
+        }
+
+        private static bool IsStableScene(string sceneName, LoadSceneMode mode)
+        {
+            if (mode != LoadSceneMode.Single || string.IsNullOrEmpty(sceneName))
+                return false;
+            return sceneName != "scene_start" && sceneName != "scene_load_helper";
         }
 
         private static void ReportPlayerTwoWhenReady()

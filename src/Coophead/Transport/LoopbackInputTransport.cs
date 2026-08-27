@@ -5,6 +5,7 @@ namespace Coophead.Transport
     internal sealed class LoopbackInputTransport : IInputFrameTransport
     {
         private readonly Queue<PendingFrame> pending = new Queue<PendingFrame>();
+        private readonly Queue<SceneCommand> scenes = new Queue<SceneCommand>();
 
         public LoopbackInputTransport(uint latencyFrames)
         {
@@ -25,11 +26,13 @@ namespace Coophead.Transport
         public void Reset()
         {
             pending.Clear();
+            scenes.Clear();
         }
 
         public void Dispose()
         {
             pending.Clear();
+            scenes.Clear();
         }
 
         public void Send(InputFrame frame)
@@ -46,6 +49,22 @@ namespace Coophead.Transport
             }
 
             frame = pending.Dequeue().Frame;
+            return true;
+        }
+
+        public void SendScene(SceneCommand command)
+        {
+            scenes.Enqueue(command);
+        }
+
+        public bool TryReceiveScene(out SceneCommand command)
+        {
+            if (scenes.Count == 0)
+            {
+                command = default(SceneCommand);
+                return false;
+            }
+            command = scenes.Dequeue();
             return true;
         }
 
