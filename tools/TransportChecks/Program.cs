@@ -241,6 +241,48 @@ using (var relayProcess = System.Diagnostics.Process.Start(new System.Diagnostic
     relayProcess.WaitForExit();
 }
 
+var signalingUrl = Environment.GetEnvironmentVariable("COOPHEAD_SIGNALING_URL");
+if (!string.IsNullOrEmpty(signalingUrl))
+{
+    using var fakeStun = new System.Net.Sockets.UdpClient(
+        new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+    var fakeStunPort = ((System.Net.IPEndPoint)fakeStun.Client.LocalEndPoint!).Port;
+    var stunRunning = true;
+    var stunThread = new Thread(() =>
+    {
+        while (stunRunning)
+        {
+            try
+            {
+                var sender = new System.Net.IPEndPoint(System.Net.IPAddress.Any, 0);
+                var request = fakeStun.Receive(ref sender);
+                if (request.Length != 20) continue;
+                var response = CreateStunResponse(request, sender);
+                fakeStun.Send(response, response.Length, sender);
+            }
+            catch (System.Net.Sockets.SocketException) { if (!stunRunning) return; }
+        }
+    }) { IsBackground = true };
+    stunThread.Start();
+    using var p2pHost = new P2pInputTransport(signalingUrl, true, "", "127.0.0.1", fakeStunPort, versionToken);
+    for (var attempt = 0; attempt < 800 && p2pHost.RoomCode.Length != 6; attempt++)
+    { p2pHost.Update(); Thread.Sleep(5); }
+    Assert(p2pHost.RoomCode.Length == 6, "P2P no creó código de sala: " + p2pHost.Status);
+    using var p2pGuest = new P2pInputTransport(signalingUrl, false, p2pHost.RoomCode,
+        "127.0.0.1", fakeStunPort, versionToken);
+    for (var attempt = 0; attempt < 1200 && (!p2pHost.IsConnected || !p2pGuest.IsConnected); attempt++)
+    { p2pHost.Update(); p2pGuest.Update(); Thread.Sleep(5); }
+    Assert(p2pHost.IsConnected && p2pGuest.IsConnected,
+        "P2P no completó hole punching: host=" + p2pHost.Status + ", guest=" + p2pGuest.Status);
+    p2pGuest.Send(new InputFrame { Tick = 808, Held = InputButtons.Dash });
+    InputFrame p2pFrame = default; var p2pArrived = false;
+    for (var attempt = 0; attempt < 200 && !p2pArrived; attempt++)
+    { p2pGuest.Update(); p2pHost.Update(); p2pArrived = p2pHost.TryReceive(0, out p2pFrame); Thread.Sleep(5); }
+    Assert(p2pArrived && p2pFrame.Tick == 808 && p2pFrame.HasHeld(InputButtons.Dash),
+        "El frame no atravesó P2P.");
+    stunRunning = false; fakeStun.Close(); stunThread.Join(1000);
+}
+
 Console.WriteLine("TransportChecks: OK");
 return;
 
@@ -248,4 +290,17 @@ static void Assert(bool condition, string message)
 {
     if (!condition)
         throw new InvalidOperationException(message);
+}
+
+static byte[] CreateStunResponse(byte[] request, System.Net.IPEndPoint endpoint)
+{
+    var response = new byte[32];
+    response[0] = 1; response[1] = 1; response[3] = 12;
+    response[4] = 0x21; response[5] = 0x12; response[6] = 0xA4; response[7] = 0x42;
+    Buffer.BlockCopy(request, 8, response, 8, 12);
+    response[21] = 0x20; response[23] = 8; response[25] = 1;
+    var port = endpoint.Port ^ 0x2112; response[26] = (byte)(port >> 8); response[27] = (byte)port;
+    var address = endpoint.Address.GetAddressBytes(); var cookie = new byte[] { 0x21, 0x12, 0xA4, 0x42 };
+    for (var i = 0; i < 4; i++) response[28 + i] = (byte)(address[i] ^ cookie[i]);
+    return response;
 }

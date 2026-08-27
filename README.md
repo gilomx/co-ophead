@@ -46,12 +46,12 @@ En otra instalación se puede definir `CUPHEAD_PATH` como propiedad de MSBuild o
 `Directory.Build.props.example` a `Directory.Build.props` y editarla.
 
 Para probar manualmente, copia `src/Coophead/bin/Debug/net35/Coophead.dll` a
-`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.10.0
+`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.11.0
 cargado` en `BepInEx/LogOutput.log`.
 
 ### Remote Input Lab
 
-La versión `0.10.0` puede crear y controlar localmente a Player Two sin un segundo
+La versión `0.11.0` puede crear y controlar localmente a Player Two sin un segundo
 mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
 Cuphead creará a ambos jugadores al cargar el mapa:
 

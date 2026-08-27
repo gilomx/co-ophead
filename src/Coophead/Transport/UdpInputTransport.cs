@@ -65,6 +65,13 @@ namespace Coophead.Transport
             return new UdpInputTransport(socket, true, null, "LAN host UDP :" + port, versionToken);
         }
 
+        internal static UdpInputTransport CreatePeer(Socket socket, bool host,
+            IPEndPoint target, uint versionToken)
+        {
+            return new UdpInputTransport(socket, host, target,
+                (host ? "P2P host UDP -> " : "P2P client UDP -> ") + target, versionToken);
+        }
+
         public static UdpInputTransport CreateClient(string hostAddress, int port, uint versionToken)
         {
             IPAddress address;
@@ -106,6 +113,14 @@ namespace Coophead.Transport
                 SendControl(LanControlPacketCodec.Hello, versionToken, configuredTarget);
                 lastHelloSentUtc = now;
                 Status = "buscando host";
+            }
+            if (host && !IsConnected && configuredTarget != null &&
+                now - lastHelloSentUtc >= RetryInterval)
+            {
+                // Abre el mapeo NAT del host; el invitado enviará Hello simultáneamente.
+                SendControl(LanControlPacketCodec.Ping, versionToken, configuredTarget);
+                lastHelloSentUtc = now;
+                Status = "abriendo ruta P2P";
             }
             if (!host && IsConnected && now - lastPingSentUtc >= RetryInterval)
             {

@@ -7,5 +7,7 @@ namespace Coophead.Transport
         LanClient,
         InternetHost,
         InternetClient,
+        P2pHost,
+        P2pClient,
     }
 }

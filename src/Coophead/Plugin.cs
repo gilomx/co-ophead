@@ -13,7 +13,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.10.0";
+        public const string PluginVersion = "0.11.0";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
 
@@ -24,6 +24,9 @@ namespace Coophead
         private ConfigEntry<string> relayAddress;
         private ConfigEntry<int> relayPort;
         private ConfigEntry<string> roomCode;
+        private ConfigEntry<string> signalingUrl;
+        private ConfigEntry<string> stunHost;
+        private ConfigEntry<int> stunPort;
         private bool showOnlineMenu;
         private string joinCode = "";
         private string onlineMessage = "";
@@ -45,10 +48,17 @@ namespace Coophead
                 "Puerto TCP del relay.");
             roomCode = Config.Bind("Internet", "RoomCode", "",
                 "Código para InternetClient; InternetHost genera uno.");
+            signalingUrl = Config.Bind("P2P", "SignalingUrl", "http://127.0.0.1:8787",
+                "Servicio gratuito de señalización.");
+            stunHost = Config.Bind("P2P", "StunHost", "stun.cloudflare.com",
+                "Servidor STUN para descubrir el endpoint público.");
+            stunPort = Config.Bind("P2P", "StunPort", 3478,
+                "Puerto UDP del servidor STUN.");
             try
             {
                 RemoteInputLab.Configure(transportMode.Value, lanHostAddress.Value, lanPort.Value,
-                    relayAddress.Value, relayPort.Value, roomCode.Value);
+                    relayAddress.Value, relayPort.Value, roomCode.Value,
+                    signalingUrl.Value, stunHost.Value, stunPort.Value);
             }
             catch (System.Exception ex)
             {
@@ -106,7 +116,8 @@ namespace Coophead
         {
             try
             {
-                RemoteInputLab.StartInternet(host, relayAddress.Value, relayPort.Value, joinCode);
+                RemoteInputLab.StartInternet(host, signalingUrl.Value, stunHost.Value,
+                    stunPort.Value, joinCode);
                 onlineMessage = "";
             }
             catch (System.Exception ex)

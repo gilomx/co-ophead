@@ -4,6 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>$(NoWarn);SYSLIB0014</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,5 +22,6 @@
     <Compile Include="..\..\src\Coophead\Transport\UdpInputTransport.cs" Link="UdpInputTransport.cs" />
     <Compile Include="..\..\src\Coophead\Transport\RelayInputTransport.cs" Link="RelayInputTransport.cs" />
     <Compile Include="..\..\src\Coophead\Transport\StunPacketCodec.cs" Link="StunPacketCodec.cs" />
+    <Compile Include="..\..\src\Coophead\Transport\P2pInputTransport.cs" Link="P2pInputTransport.cs" />
   </ItemGroup>
 </Project>

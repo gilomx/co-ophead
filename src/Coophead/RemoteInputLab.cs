@@ -7,7 +7,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x001000;
+        private const uint ModVersionToken = 0x001100;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -28,9 +28,9 @@ namespace Coophead
 
         public static bool Enabled { get; private set; }
         private static bool IsHost => transportMode == InputTransportMode.LanHost ||
-            transportMode == InputTransportMode.InternetHost;
+            transportMode == InputTransportMode.InternetHost || transportMode == InputTransportMode.P2pHost;
         private static bool IsClient => transportMode == InputTransportMode.LanClient ||
-            transportMode == InputTransportMode.InternetClient;
+            transportMode == InputTransportMode.InternetClient || transportMode == InputTransportMode.P2pClient;
         public static bool DrivesPlayerTwo => Enabled && !IsClient;
         public static string TransportStatus => transport.Status;
         public static string CurrentRoomCode
@@ -38,21 +38,26 @@ namespace Coophead
             get
             {
                 var relay = transport as RelayInputTransport;
-                return relay == null ? string.Empty : relay.RoomCode;
+                if (relay != null) return relay.RoomCode;
+                var p2p = transport as P2pInputTransport;
+                return p2p == null ? string.Empty : p2p.RoomCode;
             }
         }
 
-        public static void StartInternet(bool host, string relayAddress, int relayPort, string roomCode)
+        public static void StartInternet(bool host, string signalingUrl, string stunHost,
+            int stunPort, string roomCode)
         {
             if (!host && (roomCode == null || roomCode.Trim().Length != 6))
                 throw new System.ArgumentException("El código debe tener seis caracteres.");
-            Configure(host ? InputTransportMode.InternetHost : InputTransportMode.InternetClient,
-                "127.0.0.1", 27182, relayAddress, relayPort, roomCode);
+            Configure(host ? InputTransportMode.P2pHost : InputTransportMode.P2pClient,
+                "127.0.0.1", 27182, "127.0.0.1", 27183, roomCode,
+                signalingUrl, stunHost, stunPort);
             SetEnabled(true);
         }
 
         public static void Configure(InputTransportMode mode, string hostAddress, int port,
-            string relayAddress, int relayPort, string roomCode)
+            string relayAddress, int relayPort, string roomCode, string signalingUrl,
+            string stunHost, int stunPort)
         {
             if (port < 1 || port > 65535)
                 throw new System.ArgumentOutOfRangeException("port", "LanPort debe estar entre 1 y 65535.");
@@ -66,6 +71,10 @@ namespace Coophead
                 nextTransport = new RelayInputTransport(relayAddress, relayPort, true, string.Empty);
             else if (mode == InputTransportMode.InternetClient)
                 nextTransport = new RelayInputTransport(relayAddress, relayPort, false, roomCode);
+            else if (mode == InputTransportMode.P2pHost)
+                nextTransport = new P2pInputTransport(signalingUrl, true, "", stunHost, stunPort, ModVersionToken);
+            else if (mode == InputTransportMode.P2pClient)
+                nextTransport = new P2pInputTransport(signalingUrl, false, roomCode, stunHost, stunPort, ModVersionToken);
             else
                 nextTransport = new LoopbackInputTransport(SimulatedLatencyFrames);
 
