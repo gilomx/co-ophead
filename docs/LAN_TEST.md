@@ -53,3 +53,22 @@ todavía no verá la partida del host; esa será la siguiente fase de sincroniza
 - El puerto no debe exponerse directamente a Internet.
 - Hay ping periódico y timeout de cinco segundos; una desconexión vuelve al estado de
   espera/búsqueda sin reiniciar el juego.
+- En modo LAN, Co-ophead habilita la actualización de Unity en segundo plano para que
+  el handshake no expire al cambiar el foco entre Cuphead y herramientas de prueba.
+
+## Prueba con una sola PC
+
+`tools/CoopheadLanSender` simula el cliente sin abrir una segunda copia de Cuphead.
+Configura Cuphead como `LanHost`, inicia el sender y usa el teclado numérico mientras
+el juego conserva el foco:
+
+```powershell
+dotnet run --project .\tools\CoopheadLanSender\CoopheadLanSender.csproj
+```
+
+El sender se conecta a `127.0.0.1:27182` por defecto. `F7` lo cierra. También acepta
+dirección y puerto como argumentos para futuras pruebas:
+
+```powershell
+dotnet run --project .\tools\CoopheadLanSender\CoopheadLanSender.csproj -- 192.168.1.84 27182
+```

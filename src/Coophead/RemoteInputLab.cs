@@ -18,6 +18,8 @@ namespace Coophead
         private static bool rewiredReadReported;
         private static uint sourceTick;
         private static string lastTransportStatus;
+        private static bool originalRunInBackground;
+        private static bool runInBackgroundCaptured;
 
         public static bool Enabled { get; private set; }
         public static bool DrivesPlayerTwo => Enabled && transportMode != InputTransportMode.LanClient;
@@ -38,6 +40,13 @@ namespace Coophead
             transport.Dispose();
             transport = nextTransport;
             transportMode = mode;
+            if (!runInBackgroundCaptured)
+            {
+                originalRunInBackground = Application.runInBackground;
+                runInBackgroundCaptured = true;
+            }
+            if (mode != InputTransportMode.Loopback)
+                Application.runInBackground = true;
             Plugin.Log.LogInfo("[InputLab] Transporte configurado: " + transport.Description);
         }
 
@@ -45,6 +54,8 @@ namespace Coophead
         {
             Enabled = false;
             transport.Dispose();
+            if (runInBackgroundCaptured)
+                Application.runInBackground = originalRunInBackground;
         }
 
         public static void Tick()
@@ -161,7 +172,7 @@ namespace Coophead
                 return;
 
             rewiredReadReported = true;
-            Plugin.Log.LogMessage("[InputLab] Rewired Player 2 está consumiendo frames loopback.");
+            Plugin.Log.LogMessage("[InputLab] Rewired Player 2 está consumiendo frames del transporte.");
         }
 
         public static bool GetButton(int actionId, ButtonPhase phase)
