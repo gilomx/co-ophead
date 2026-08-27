@@ -44,6 +44,13 @@ LanPort = 27182
 Player Two aparece en el host y responde al teclado numérico del cliente. El cliente
 todavía no verá la partida del host; esa será la siguiente fase de sincronización.
 
+Co-ophead también envía un contexto fiable con el slot seleccionado, personaje
+principal, dificultad, mapa y nivel. El sender lo imprime como `contexto #N`. Un
+cliente Cuphead aplica únicamente slot, personaje y dificultad; mapa y nivel se
+mantienen informativos para no sobrescribir progreso local durante esta fase.
+El host refresca el contexto cada cinco segundos para que un cliente reconectado lo
+reciba; el sender oculta refrescos idénticos y solo imprime cambios reales.
+
 ## Límites actuales
 
 - No hay cifrado, autenticación, lobby ni NAT traversal.

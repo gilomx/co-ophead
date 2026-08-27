@@ -7,7 +7,7 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x000500;
+        private const uint ModVersionToken = 0x000600;
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -21,6 +21,8 @@ namespace Coophead
         private static string lastTransportStatus;
         private static bool originalRunInBackground;
         private static bool runInBackgroundCaptured;
+        private static SessionContext lastSentContext;
+        private static bool hasLastSentContext;
 
         public static bool Enabled { get; private set; }
         public static bool DrivesPlayerTwo => Enabled && transportMode != InputTransportMode.LanClient;
@@ -77,6 +79,7 @@ namespace Coophead
                 Plugin.Log.LogMessage("[InputLab] " + transport.Status);
             }
             ProcessSceneCommands();
+            ProcessSessionContexts();
 
             if (DrivesPlayerTwo)
             {
@@ -85,6 +88,8 @@ namespace Coophead
             }
 
             sourceTick++;
+            if (transportMode == InputTransportMode.LanHost && sourceTick % 30 == 0)
+                CaptureAndSendContext();
             if (transportMode != InputTransportMode.LanHost)
             {
                 var held = ReadButtons();
@@ -192,6 +197,71 @@ namespace Coophead
             if (mode != LoadSceneMode.Single || string.IsNullOrEmpty(sceneName))
                 return false;
             return sceneName != "scene_start" && sceneName != "scene_load_helper";
+        }
+
+        private static void CaptureAndSendContext()
+        {
+            try
+            {
+                var data = PlayerData.Data;
+                var context = new SessionContext
+                {
+                    SaveSlot = (byte)UnityEngine.Mathf.Clamp(PlayerData.CurrentSaveFileIndex, 0, 2),
+                    Flags = (byte)((data != null ? 1 : 0) |
+                        (PlayerManager.player1IsMugman ? 2 : 0) |
+                        (Level.Current != null ? 4 : 0)),
+                    Difficulty = (byte)Level.CurrentMode,
+                    CurrentMap = data == null ? -1 : (int)data.CurrentMap,
+                    CurrentLevel = Level.Current == null ? -1 : (int)Level.Current.CurrentLevel,
+                };
+
+                if (hasLastSentContext && ContextEquals(context, lastSentContext) && sourceTick % 300 != 0)
+                    return;
+                lastSentContext = context;
+                hasLastSentContext = true;
+                transport.SendContext(context);
+                Plugin.Log.LogInfo("[SessionSync] Contexto enviado: slot=" + context.SaveSlot +
+                    " mugman=" + context.PlayerOneIsMugman + " difficulty=" + context.Difficulty +
+                    " map=" + context.CurrentMap + " level=" + context.CurrentLevel);
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning("[SessionSync] No se pudo capturar contexto: " + ex.Message);
+            }
+        }
+
+        private static void ProcessSessionContexts()
+        {
+            if (transportMode != InputTransportMode.LanClient)
+                return;
+
+            SessionContext context;
+            while (transport.TryReceiveContext(out context))
+            {
+                Plugin.Log.LogMessage("[SessionSync] Contexto recibido #" + context.Sequence +
+                    ": slot=" + context.SaveSlot + " mugman=" + context.PlayerOneIsMugman +
+                    " difficulty=" + context.Difficulty + " map=" + context.CurrentMap +
+                    " level=" + context.CurrentLevel);
+                if (!context.HasSave || context.SaveSlot > 2 || context.Difficulty > 2)
+                    continue;
+                try
+                {
+                    PlayerData.CurrentSaveFileIndex = context.SaveSlot;
+                    PlayerManager.player1IsMugman = context.PlayerOneIsMugman;
+                    Level.SetCurrentMode((Level.Mode)context.Difficulty);
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning("[SessionSync] No se pudo aplicar contexto: " + ex.Message);
+                }
+            }
+        }
+
+        private static bool ContextEquals(SessionContext left, SessionContext right)
+        {
+            return left.SaveSlot == right.SaveSlot && left.Flags == right.Flags &&
+                left.Difficulty == right.Difficulty && left.CurrentMap == right.CurrentMap &&
+                left.CurrentLevel == right.CurrentLevel;
         }
 
         private static void ReportPlayerTwoWhenReady()

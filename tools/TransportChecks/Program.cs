@@ -42,7 +42,7 @@ Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
 encoded[4]++;
 Assert(!InputFramePacketCodec.TryDecode(encoded, out _), "El codec aceptó otro protocolo.");
 
-const uint versionToken = 0x000500;
+const uint versionToken = 0x000600;
 var port = 32000 + Environment.ProcessId % 10000;
 using (var host = UdpInputTransport.CreateHost(port, versionToken, System.Net.IPAddress.Loopback))
 using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionToken))
@@ -110,6 +110,41 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         Thread.Sleep(5);
     }
     Assert(!client.TryReceiveScene(out _), "El cliente entregó una escena duplicada.");
+
+    host.SendContext(new SessionContext
+    {
+        SaveSlot = 1,
+        Flags = 1 | 2 | 4,
+        Difficulty = 2,
+        CurrentMap = 6,
+        CurrentLevel = 42,
+    });
+    SessionContext receivedContext = default;
+    var contextArrived = false;
+    for (var attempt = 0; attempt < 200 && !contextArrived; attempt++)
+    {
+        host.Update();
+        client.Update();
+        host.Update();
+        contextArrived = client.TryReceiveContext(out receivedContext);
+        if (!contextArrived)
+            Thread.Sleep(5);
+    }
+    Assert(contextArrived, "El contexto fiable de sesión no llegó.");
+    Assert(receivedContext.SaveSlot == 1 && receivedContext.PlayerOneIsMugman &&
+        receivedContext.IsInLevel && receivedContext.Difficulty == 2 &&
+        receivedContext.CurrentMap == 6 && receivedContext.CurrentLevel == 42,
+        "El transporte alteró el contexto de sesión.");
+    Assert(receivedContext.Sequence != 0, "El contexto llegó sin secuencia.");
+
+    for (var attempt = 0; attempt < 80; attempt++)
+    {
+        host.Update();
+        client.Update();
+        host.Update();
+        Thread.Sleep(5);
+    }
+    Assert(!client.TryReceiveContext(out _), "El cliente entregó un contexto duplicado.");
 }
 
 var rejectPort = port + 1;

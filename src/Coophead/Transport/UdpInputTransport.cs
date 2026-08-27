@@ -16,6 +16,7 @@ namespace Coophead.Transport
         private readonly uint versionToken;
         private readonly Queue<InputFrame> receivedFrames = new Queue<InputFrame>();
         private readonly Queue<SceneCommand> receivedScenes = new Queue<SceneCommand>();
+        private readonly Queue<SessionContext> receivedContexts = new Queue<SessionContext>();
         private readonly byte[] receiveBuffer = new byte[128];
         private EndPoint peer;
         private InputButtons lastReceivedHeld;
@@ -28,6 +29,11 @@ namespace Coophead.Transport
         private bool hasPendingScene;
         private uint nextSceneSequence = 1;
         private uint lastReceivedSceneSequence;
+        private DateTime lastContextSentUtc;
+        private SessionContext pendingContext;
+        private bool hasPendingContext;
+        private uint nextContextSequence = 1;
+        private uint lastReceivedContextSequence;
 
         private UdpInputTransport(Socket socket, bool host, EndPoint target,
             string description, uint versionToken)
@@ -78,10 +84,12 @@ namespace Coophead.Transport
         {
             receivedFrames.Clear();
             receivedScenes.Clear();
+            receivedContexts.Clear();
             lastReceivedHeld = InputButtons.None;
             lastReceivedTick = 0;
             PingMilliseconds = -1;
             lastReceivedSceneSequence = 0;
+            lastReceivedContextSequence = 0;
             DrainSocket();
         }
 
@@ -107,6 +115,12 @@ namespace Coophead.Transport
             {
                 SendPacket(LanScenePacketCodec.Encode(pendingScene), peer);
                 lastSceneSentUtc = now;
+            }
+            if (host && IsConnected && hasPendingContext &&
+                now - lastContextSentUtc >= ReliableRetryInterval)
+            {
+                SendPacket(LanSessionContextPacketCodec.Encode(pendingContext), peer);
+                lastContextSentUtc = now;
             }
         }
 
@@ -147,6 +161,29 @@ namespace Coophead.Transport
                 return false;
             }
             command = receivedScenes.Dequeue();
+            return true;
+        }
+
+        public void SendContext(SessionContext context)
+        {
+            if (!host)
+                return;
+            context.Sequence = nextContextSequence++;
+            if (nextContextSequence == 0)
+                nextContextSequence = 1;
+            pendingContext = context;
+            hasPendingContext = true;
+            lastContextSentUtc = DateTime.MinValue;
+        }
+
+        public bool TryReceiveContext(out SessionContext context)
+        {
+            if (host || receivedContexts.Count == 0)
+            {
+                context = default(SessionContext);
+                return false;
+            }
+            context = receivedContexts.Dequeue();
             return true;
         }
 
@@ -201,6 +238,21 @@ namespace Coophead.Transport
                 }
                 return;
             }
+            SessionContext context;
+            if (LanSessionContextPacketCodec.TryDecode(packet, out context))
+            {
+                if (!host && IsConnected && SameEndpoint(sender, peer))
+                {
+                    lastPacketReceivedUtc = now;
+                    SendControl(LanControlPacketCodec.ContextAck, context.Sequence, peer);
+                    if (context.Sequence > lastReceivedContextSequence)
+                    {
+                        lastReceivedContextSequence = context.Sequence;
+                        receivedContexts.Enqueue(context);
+                    }
+                }
+                return;
+            }
             if (!host || !IsConnected || !SameEndpoint(sender, peer))
                 return;
             InputFrame frame;
@@ -232,6 +284,7 @@ namespace Coophead.Transport
                 Status = "cliente conectado: " + sender;
                 SendControl(LanControlPacketCodec.HelloAck, versionToken, peer);
                 lastSceneSentUtc = DateTime.MinValue;
+                lastContextSentUtc = DateTime.MinValue;
                 return;
             }
             if (!host && type == LanControlPacketCodec.HelloAck && value == versionToken &&
@@ -269,6 +322,13 @@ namespace Coophead.Transport
             {
                 lastPacketReceivedUtc = now;
                 hasPendingScene = false;
+                return;
+            }
+            if (host && IsConnected && type == LanControlPacketCodec.ContextAck &&
+                SameEndpoint(sender, peer) && hasPendingContext && value == pendingContext.Sequence)
+            {
+                lastPacketReceivedUtc = now;
+                hasPendingContext = false;
             }
         }
 
@@ -280,6 +340,7 @@ namespace Coophead.Transport
             lastReceivedTick = 0;
             receivedFrames.Clear();
             receivedScenes.Clear();
+            receivedContexts.Clear();
             PingMilliseconds = -1;
             Status = status;
         }

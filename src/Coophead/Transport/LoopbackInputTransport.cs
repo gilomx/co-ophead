@@ -6,6 +6,7 @@ namespace Coophead.Transport
     {
         private readonly Queue<PendingFrame> pending = new Queue<PendingFrame>();
         private readonly Queue<SceneCommand> scenes = new Queue<SceneCommand>();
+        private readonly Queue<SessionContext> contexts = new Queue<SessionContext>();
 
         public LoopbackInputTransport(uint latencyFrames)
         {
@@ -27,12 +28,14 @@ namespace Coophead.Transport
         {
             pending.Clear();
             scenes.Clear();
+            contexts.Clear();
         }
 
         public void Dispose()
         {
             pending.Clear();
             scenes.Clear();
+            contexts.Clear();
         }
 
         public void Send(InputFrame frame)
@@ -65,6 +68,22 @@ namespace Coophead.Transport
                 return false;
             }
             command = scenes.Dequeue();
+            return true;
+        }
+
+        public void SendContext(SessionContext context)
+        {
+            contexts.Enqueue(context);
+        }
+
+        public bool TryReceiveContext(out SessionContext context)
+        {
+            if (contexts.Count == 0)
+            {
+                context = default(SessionContext);
+                return false;
+            }
+            context = contexts.Dequeue();
             return true;
         }
 

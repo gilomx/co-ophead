@@ -3,12 +3,12 @@ using System.Runtime.InteropServices;
 using Coophead;
 using Coophead.Transport;
 
-const uint VersionToken = 0x000500;
+const uint VersionToken = 0x000600;
 var host = args.Length > 0 ? args[0] : "127.0.0.1";
 var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 27182;
 
-Console.Title = "Co-ophead LAN Sender 0.5.0";
-Console.WriteLine("Co-ophead LAN Sender 0.5.0");
+Console.Title = "Co-ophead LAN Sender 0.6.0";
+Console.WriteLine("Co-ophead LAN Sender 0.6.0");
 Console.WriteLine($"Destino: {host}:{port}");
 Console.WriteLine("Mantén Cuphead enfocado. F7 cierra este sender.");
 Console.WriteLine();
@@ -20,6 +20,8 @@ var frameInterval = TimeSpan.FromSeconds(1.0 / 60.0);
 var previousHeld = InputButtons.None;
 var lastStatus = string.Empty;
 var lastPingPrintedUtc = DateTime.MinValue;
+var hasPrintedContext = false;
+var lastPrintedContext = default(SessionContext);
 uint tick = 0;
 
 while (!KeyDown(VirtualKey.F7))
@@ -39,6 +41,18 @@ while (!KeyDown(VirtualKey.F7))
     SceneCommand scene;
     while (transport.TryReceiveScene(out scene))
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] escena #{scene.Sequence}: {scene.SceneName}");
+    SessionContext context;
+    while (transport.TryReceiveContext(out context))
+    {
+        if (!hasPrintedContext || !SameContext(context, lastPrintedContext))
+        {
+            hasPrintedContext = true;
+            lastPrintedContext = context;
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] contexto #{context.Sequence}: " +
+                $"slot={context.SaveSlot + 1}, lead={(context.PlayerOneIsMugman ? "Mugman" : "Cuphead")}, " +
+                $"difficulty={context.Difficulty}, map={context.CurrentMap}, level={context.CurrentLevel}");
+        }
+    }
 
     if (stopwatch.Elapsed >= nextFrameAt)
     {
@@ -89,6 +103,11 @@ static void AddIfDown(ref InputButtons buttons, VirtualKey key, InputButtons but
 }
 
 static bool KeyDown(VirtualKey key) => (GetAsyncKeyState((int)key) & 0x8000) != 0;
+
+static bool SameContext(SessionContext left, SessionContext right) =>
+    left.SaveSlot == right.SaveSlot && left.Flags == right.Flags &&
+    left.Difficulty == right.Difficulty && left.CurrentMap == right.CurrentMap &&
+    left.CurrentLevel == right.CurrentLevel;
 
 [DllImport("user32.dll")]
 static extern short GetAsyncKeyState(int virtualKey);

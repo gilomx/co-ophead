@@ -77,6 +77,14 @@ al juego sin modificar el resultado original.
 El slot y el personaje son conceptos distintos. Player Two será Mugman cuando Player
 One sea Cuphead, o Cuphead cuando Player One sea Mugman.
 
+## Contexto de sesión confirmado
+
+- `PlayerData.CurrentSaveFileIndex`: slot activo, de 0 a 2.
+- `PlayerManager.player1IsMugman`: personaje principal.
+- `Level.CurrentMode`: dificultad (`Easy=0`, `Normal=1`, `Hard=2`).
+- `PlayerData.Data.CurrentMap`: mapa del guardado activo.
+- `Level.Current.CurrentLevel`: nivel en ejecución cuando existe una instancia.
+
 ## Repetir la inspección
 
 ```powershell
