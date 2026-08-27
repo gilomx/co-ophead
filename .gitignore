@@ -14,3 +14,6 @@ BepInEx/
 Directory.Build.props.user
 Directory.Build.props
 local.settings.json
+
+# Repositorios externos usados solo como referencia local
+.reference/

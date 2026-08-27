@@ -46,8 +46,29 @@ En otra instalación se puede definir `CUPHEAD_PATH` como propiedad de MSBuild o
 `Directory.Build.props.example` a `Directory.Build.props` y editarla.
 
 Para probar manualmente, copia `src/Coophead/bin/Debug/net35/Coophead.dll` a
-`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.1.0
+`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.2.0
 cargado` en `BepInEx/LogOutput.log`.
+
+### Remote Input Lab
+
+La versión `0.2.0` puede crear y controlar localmente a Player Two sin un segundo
+mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
+Cuphead creará a ambos jugadores al cargar el mapa:
+
+- `Numpad 4/6`: izquierda/derecha;
+- `Numpad 2/8`: abajo/arriba;
+- `Numpad 0`: salto/parry;
+- `Numpad 1`: disparo;
+- `Numpad 3`: dash;
+- `Numpad 5`: fijar dirección;
+- `Numpad 7`: cambiar arma;
+- `Numpad 9`: super;
+- `Numpad Enter`: pausa;
+- `Numpad .`: swap;
+- `F8`: activar o desactivar el laboratorio.
+
+El laboratorio solo sustituye al jugador Rewired con ID `1`. Al desactivarlo, Cuphead
+recupera inmediatamente sus entradas originales.
 
 ## Alcance y límites
 

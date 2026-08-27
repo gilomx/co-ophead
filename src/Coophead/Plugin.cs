@@ -1,4 +1,5 @@
 using BepInEx;
+using HarmonyLib;
 using UnityEngine.SceneManagement;
 
 namespace Coophead
@@ -9,12 +10,24 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.2.0";
+
+        internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
+
+        private Harmony harmony;
 
         private void Awake()
         {
+            Log = Logger;
             Logger.LogInfo(PluginName + " " + PluginVersion + " cargado.");
+            harmony = new Harmony(PluginGuid);
+            harmony.PatchAll(typeof(Plugin).Assembly);
             SceneManager.sceneLoaded += OnSceneLoaded;
+        }
+
+        private void Update()
+        {
+            RemoteInputLab.Tick();
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
@@ -25,6 +38,8 @@ namespace Coophead
         private void OnDestroy()
         {
             SceneManager.sceneLoaded -= OnSceneLoaded;
+            if (harmony != null)
+                harmony.UnpatchSelf();
         }
     }
 }
