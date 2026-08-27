@@ -55,6 +55,9 @@ La versión `0.2.0` puede crear y controlar localmente a Player Two sin un segun
 mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
 Cuphead creará a ambos jugadores al cargar el mapa:
 
+Player Two no equivale siempre a Mugman: si Player One usa Mugman, el segundo slot
+será Cuphead, respetando el comportamiento cooperativo nativo del juego.
+
 - `Numpad 4/6`: izquierda/derecha;
 - `Numpad 2/8`: abajo/arriba;
 - `Numpad 0`: salto/parry;
@@ -65,10 +68,16 @@ Cuphead creará a ambos jugadores al cargar el mapa:
 - `Numpad 9`: super;
 - `Numpad Enter`: pausa;
 - `Numpad .`: swap;
-- `F8`: activar o desactivar el laboratorio.
+- `F8`: activar el laboratorio; repetirlo no lo desactiva;
+- `F7`: desactivar el laboratorio.
 
 El laboratorio solo sustituye al jugador Rewired con ID `1`. Al desactivarlo, Cuphead
 recupera inmediatamente sus entradas originales.
+
+Las entradas pasan por un transporte loopback con tres frames de latencia simulada.
+El teclado produce `InputFrame`; los parches consumen únicamente frames entregados por
+el transporte. Así podremos cambiar loopback por LAN o Steam P2P sin reescribir la
+integración con el juego.
 
 ## Alcance y límites
 

@@ -1,25 +1,30 @@
 using UnityEngine;
+using Coophead.Transport;
 
 namespace Coophead
 {
     internal static class RemoteInputLab
     {
-        private static InputFrame current;
+        private const uint SimulatedLatencyFrames = 3;
+
+        private static readonly IInputFrameTransport transport =
+            new LoopbackInputTransport(SimulatedLatencyFrames);
+
+        private static InputFrame received;
         private static InputButtons previousHeld;
         private static bool playerTwoReported;
+        private static bool rewiredReadReported;
+        private static uint sourceTick;
 
         public static bool Enabled { get; private set; }
 
         public static void Tick()
         {
-            if (Input.GetKeyDown(KeyCode.F8))
-            {
-                Enabled = !Enabled;
-                previousHeld = InputButtons.None;
-                current = new InputFrame();
-                playerTwoReported = false;
-                Plugin.Log.LogMessage("Remote Input Lab " + (Enabled ? "ACTIVADO" : "DESACTIVADO") + ".");
-            }
+            if (Input.GetKeyDown(KeyCode.F8) && !Enabled)
+                SetEnabled(true);
+
+            if (Input.GetKeyDown(KeyCode.F7) && Enabled)
+                SetEnabled(false);
 
             if (!Enabled)
                 return;
@@ -27,10 +32,11 @@ namespace Coophead
             EnsureMultiplayerState();
             ReportPlayerTwoWhenReady();
 
+            sourceTick++;
             var held = ReadButtons();
-            current = new InputFrame
+            var sampled = new InputFrame
             {
-                Tick = current.Tick + 1,
+                Tick = sourceTick,
                 Horizontal = ReadAxis(KeyCode.Keypad4, KeyCode.Keypad6),
                 Vertical = ReadAxis(KeyCode.Keypad2, KeyCode.Keypad8),
                 Held = held,
@@ -38,6 +44,31 @@ namespace Coophead
                 Released = previousHeld & ~held,
             };
             previousHeld = held;
+
+            transport.Send(sampled);
+
+            // Los bordes solo viven durante un tick receptor. Si un transporte no
+            // entrega un frame nuevo, mantenemos ejes/botones pero no repetimos Down/Up.
+            received.Pressed = InputButtons.None;
+            received.Released = InputButtons.None;
+
+            InputFrame delivered;
+            while (transport.TryReceive(sourceTick, out delivered))
+                received = delivered;
+
+        }
+
+        private static void SetEnabled(bool enabled)
+        {
+            Enabled = enabled;
+            previousHeld = InputButtons.None;
+            received = new InputFrame();
+            sourceTick = 0;
+            transport.Reset();
+            playerTwoReported = false;
+            rewiredReadReported = false;
+            Plugin.Log.LogMessage("Remote Input Lab " + (Enabled ? "ACTIVADO" : "DESACTIVADO") +
+                (Enabled ? " (" + transport.Description + ")." : "."));
         }
 
         public static void EnsureMultiplayerState()
@@ -77,7 +108,16 @@ namespace Coophead
             }
         }
 
-        public static float GetAxis(int actionId) => current.GetAxis(actionId);
+        public static float GetAxis(int actionId) => received.GetAxis(actionId);
+
+        public static void ReportRewiredRead()
+        {
+            if (rewiredReadReported)
+                return;
+
+            rewiredReadReported = true;
+            Plugin.Log.LogMessage("[InputLab] Rewired Player 2 está consumiendo frames loopback.");
+        }
 
         public static bool GetButton(int actionId, ButtonPhase phase)
         {
@@ -86,10 +126,10 @@ namespace Coophead
                 return false;
 
             if (phase == ButtonPhase.Pressed)
-                return current.HasPressed(button);
+                return received.HasPressed(button);
             if (phase == ButtonPhase.Released)
-                return current.HasReleased(button);
-            return current.HasHeld(button);
+                return received.HasReleased(button);
+            return received.HasHeld(button);
         }
 
         private static sbyte ReadAxis(KeyCode negative, KeyCode positive)

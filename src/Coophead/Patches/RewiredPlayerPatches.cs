@@ -7,7 +7,10 @@ namespace Coophead.Patches
     {
         public static bool ShouldOverride(Player player)
         {
-            return RemoteInputLab.Enabled && player != null && player.id == 1;
+            var shouldOverride = RemoteInputLab.Enabled && player != null && player.id == 1;
+            if (shouldOverride)
+                RemoteInputLab.ReportRewiredRead();
+            return shouldOverride;
         }
     }
 

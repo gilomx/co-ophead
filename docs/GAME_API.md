@@ -74,6 +74,9 @@ Mientras esté activado, solo reemplazará lecturas cuyo `Rewired.Player.id` sea
 Player Two. Cuando esté desactivado, los parches devolverán el control inmediatamente
 al juego sin modificar el resultado original.
 
+El slot y el personaje son conceptos distintos. Player Two será Mugman cuando Player
+One sea Cuphead, o Cuphead cuando Player One sea Mugman.
+
 ## Repetir la inspección
 
 ```powershell
