@@ -1,0 +1,86 @@
+# Superficie de integración de Cuphead
+
+Inventario obtenido de la instalación local actualmente probada. Este documento
+contiene únicamente nombres, firmas y constantes; no incluye código ni binarios del
+juego.
+
+## Versión observada
+
+- Ejecutable Unity: `2017.4.9.7177439`
+- BepInEx: `5.4.23.4`
+- Harmony: `2.9.0.0`
+- Ensamblado principal: `Assembly-CSharp 0.0.0.0`
+
+## Ruta de entrada
+
+`PlayerInput` es la frontera útil entre la lógica de Cuphead y Rewired:
+
+- `Init(PlayerId)` obtiene `Rewired.Player` mediante
+  `PlayerManager.GetPlayerInput(PlayerId)`.
+- `GetAxis(PlayerInput.Axis)` delega a `Rewired.Player.GetAxis(int)`.
+- `GetButton(CupheadButton)` delega a `Rewired.Player.GetButton(int)`.
+- `PlayerManager` conserva diccionarios de entradas y controladores por jugador.
+
+Esto permite sustituir lecturas de Player Two sin alterar los motores de movimiento.
+Para cubrir transiciones de botones usadas directamente por el juego, el laboratorio
+también deberá interceptar `Rewired.Player.GetButtonDown(int)` y `GetButtonUp(int)`.
+
+## Identificadores confirmados
+
+### Jugadores
+
+- `PlayerOne = 0`
+- `PlayerTwo = 1`
+
+### Ejes
+
+- `MoveHorizontal = 0`
+- `MoveVertical = 1`
+
+### Botones de juego
+
+- `Jump = 2`
+- `Shoot = 3`
+- `Super = 4`
+- `SwitchWeapon = 5`
+- `Lock = 6`
+- `Dash = 7`
+- `Pause = 8`
+- `Accept = 13`
+- `Cancel = 14`
+- `EquipMenu = 15`
+- `Swap = 26`
+
+## Motores observados
+
+- `MapPlayerMotor.Update()` para el mapa.
+- `LevelPlayerMotor.FixedUpdate()` para niveles terrestres.
+- `PlanePlayerMotor.FixedUpdate()` para niveles de avión.
+- `ArcadePlayerMotor.FixedUpdate()` para escenas especiales.
+
+No los parchearemos en el primer prototipo. Si todos consumen la misma entrada de
+Rewired, una sola capa remota podrá servir para los distintos tipos de nivel.
+
+## Decisión para Remote Input Lab
+
+El laboratorio mantendrá un `InputFrame` con:
+
+- tick local;
+- dos ejes cuantizados;
+- máscara de botones mantenidos;
+- máscaras de botones pulsados y liberados.
+
+Mientras esté activado, solo reemplazará lecturas cuyo `Rewired.Player.id` sea el de
+Player Two. Cuando esté desactivado, los parches devolverán el control inmediatamente
+al juego sin modificar el resultado original.
+
+## Repetir la inspección
+
+```powershell
+dotnet run --project .\tools\AssemblyInspector\AssemblyInspector.csproj -- `
+  'RUTA_A_CUPHEAD\Cuphead_Data\Managed\Assembly-CSharp.dll' `
+  --full --il '=PlayerInput' '=PlayerId' '=CupheadButton'
+```
+
+La herramienta lee metadatos con Mono.Cecil incluido en BepInEx. No escribe sobre el
+ensamblado inspeccionado.

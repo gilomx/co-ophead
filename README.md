@@ -28,6 +28,7 @@ de elegir el transporte definitivo.
   solo después de estabilizar el juego base.
 
 Consulta [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para las decisiones y fases.
+La superficie de integración confirmada está en [docs/GAME_API.md](docs/GAME_API.md).
 
 ## Estado
 
