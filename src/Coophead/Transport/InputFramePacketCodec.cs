@@ -4,7 +4,7 @@ namespace Coophead.Transport
 {
     internal static class InputFramePacketCodec
     {
-        public const byte ProtocolVersion = 2;
+        public const byte ProtocolVersion = 3;
         public const byte InputPacketType = 1;
         public const int PacketSize = 24;
 

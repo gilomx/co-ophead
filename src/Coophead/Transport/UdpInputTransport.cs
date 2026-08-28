@@ -9,7 +9,7 @@ namespace Coophead.Transport
     {
         private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(1);
         private static readonly TimeSpan ReliableRetryInterval = TimeSpan.FromMilliseconds(300);
-        private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
         private readonly Socket socket;
         private readonly bool host;
         private readonly EndPoint configuredTarget;

@@ -176,6 +176,8 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         PlayerTwoY = 16.5f,
         PlayerOneHealth = 3,
         PlayerTwoHealth = 0,
+        PlayerOneMapHorizontal = -127,
+        PlayerOneMapVertical = 64,
     });
     PlayerStateSnapshot receivedState = default;
     var stateArrived = false;
@@ -187,7 +189,9 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     }
     Assert(stateArrived && receivedState.Tick == 900 && receivedState.PresentMask == 3 &&
         receivedState.DeadMask == 2 && receivedState.PlayerOneX == 12.5f &&
-        receivedState.PlayerTwoY == 16.5f && receivedState.PlayerOneHealth == 3,
+        receivedState.PlayerTwoY == 16.5f && receivedState.PlayerOneHealth == 3 &&
+        receivedState.PlayerOneMapHorizontal == -127 &&
+        receivedState.PlayerOneMapVertical == 64,
         "El transporte alteró el snapshot de jugadores.");
 }
 

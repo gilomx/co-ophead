@@ -30,9 +30,9 @@ Conseguir que dos computadoras ejecuten una partida vanilla de dos jugadores:
 - ambos cargan la misma escena y partida;
 - por la red viajan entradas, eventos y correcciones de estado, no audio ni video.
 
-El primer hito no tendrá lobby, interfaz ni matchmaking. Será una prueba local que
-inyecte entradas remotas en Player Two. Así podremos validar la parte difícil antes
-de elegir el transporte definitivo.
+El primer hito usa un lobby pequeño dentro del frontend e inyecta las entradas del
+invitado en Player Two. Así se puede validar la parte difícil antes de ampliar la
+sincronización de combate.
 
 ## Enfoque técnico
 
@@ -49,8 +49,16 @@ La superficie de integración confirmada está en [docs/GAME_API.md](docs/GAME_A
 
 ## Estado
 
-Prueba P2P 0.11.2 en curso: el plugin puede crear salas mediante señalización web,
-descubrir los endpoints con STUN y abrir una conexión UDP directa entre dos redes.
+La descarga estable sigue siendo `0.11.2`. La rama principal prepara `0.12.4`: añade
+**CO-OPHEAD** al primer menú con la misma tipografía y composición del frontend,
+permite copiar el código de sala, muestra el reloj de arena original durante la
+conexión y separa correctamente Player One/Player Two en el invitado.
+
+En una sesión, el host elige el único save autoritativo. El invitado no escribe su
+progreso local mientras está conectado. Cuphead asigna automáticamente al segundo
+jugador el personaje opuesto al primero, evitando personajes duplicados.
+En este MVP todavía no se copia el contenido completo del save: ambos equipos deben
+tener progreso compatible en el mismo número de slot para recorrer los mismos mapas.
 
 ### Compilar
 
@@ -58,25 +66,29 @@ descubrir los endpoints con STUN y abrir una conexión UDP directa entre dos red
 dotnet build .\src\Coophead\Coophead.csproj -c Debug
 ```
 
-La ruta detectada en esta máquina es `E:\SteamLibrary\steamapps\common\Cuphead`.
-En otra instalación se puede definir `CUPHEAD_PATH` como propiedad de MSBuild o copiar
-`Directory.Build.props.example` a `Directory.Build.props` y editarla.
+En esta máquina Cuphead está en
+`C:\Program Files (x86)\Steam\steamapps\common\Cuphead`. Se puede definir
+`CUPHEAD_PATH` como propiedad de MSBuild o copiar `Directory.Build.props.example` a
+`Directory.Build.props` y editarla.
 
 Para probar manualmente, copia `src/Coophead/bin/Debug/net35/Coophead.dll` a
-`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.11.2
+`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.12.4
 cargado` en `BepInEx/LogOutput.log`.
 
 ### Remote Input Lab
 
-La versión `0.11.2` puede crear y controlar localmente a Player Two sin un segundo
+La versión de desarrollo `0.12.4` puede crear y controlar localmente a Player Two sin un segundo
 mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
 Cuphead creará a ambos jugadores al cargar el mapa:
 
 Player Two no equivale siempre a Mugman: si Player One usa Mugman, el segundo slot
 será Cuphead, respetando el comportamiento cooperativo nativo del juego.
 
-Pulsa `F6` para abrir **Co-ophead**, crear una sala o unirte con un código de
-seis caracteres. `F8` sigue activando el laboratorio de entrada local/LAN.
+En el primer menú selecciona **CO-OPHEAD**. El anfitrión crea la sala, copia el código
+y espera al invitado; cuando se conecte verá **EMPEZAR** y elegirá el save autoritativo.
+El invitado escribe o pega el código de seis caracteres en la fila con cursor y queda
+esperando al anfitrión, sin abrir un save local. `F6` conserva el panel de diagnóstico
+como respaldo y `F8` sigue activando el laboratorio loopback.
 
 - `Numpad 4/6`: izquierda/derecha;
 - `Numpad 2/8`: abajo/arriba;
@@ -91,8 +103,12 @@ seis caracteres. `F8` sigue activando el laboratorio de entrada local/LAN.
 - `F8`: activar el laboratorio; repetirlo no lo desactiva;
 - `F7`: desactivar el laboratorio.
 
-El laboratorio solo sustituye al jugador Rewired con ID `1`. Al desactivarlo, Cuphead
-recupera inmediatamente sus entradas originales.
+En Internet o LAN, el invitado usa los controles que tenga configurados para Player
+One, envía ese frame y lo aplica como predicción a Player Two. Como respaldo para
+el movimiento puede usar las flechas, `WASD`, `Numpad 4/6` (izquierda/derecha) y
+`Numpad 2/8` (abajo/arriba). Se leen ambos perfiles locales de Rewired para tolerar
+la asignación de dispositivos de una VM. Su Player One local queda reservado para representar al host. Al
+desactivar el laboratorio, Cuphead recupera sus entradas.
 
 Las entradas pasan por un transporte loopback con tres frames de latencia simulada.
 El teclado produce `InputFrame`; los parches consumen únicamente frames entregados por
@@ -100,8 +116,10 @@ el transporte. Así podremos cambiar loopback por LAN o Steam P2P sin reescribir
 integración con el juego.
 
 También está disponible el primer transporte UDP para dos equipos en una red local.
-Consulta [docs/LAN_TEST.md](docs/LAN_TEST.md). Esta fase transmite entradas, pero aún
-no replica la escena ni el mundo en la pantalla del invitado.
+Consulta [docs/LAN_TEST.md](docs/LAN_TEST.md). La posición de ambos jugadores ya se
+corrige con snapshots básicos tanto en el mapa como dentro de niveles; enemigos,
+animaciones y combate todavía requieren una
+sincronización más completa.
 
 ## Alcance y límites
 

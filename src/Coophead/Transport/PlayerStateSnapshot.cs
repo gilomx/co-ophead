@@ -11,5 +11,7 @@ namespace Coophead.Transport
         public float PlayerTwoY;
         public byte PlayerOneHealth;
         public byte PlayerTwoHealth;
+        public sbyte PlayerOneMapHorizontal;
+        public sbyte PlayerOneMapVertical;
     }
 }

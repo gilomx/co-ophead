@@ -5,15 +5,18 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <NoWarn>$(NoWarn);SYSLIB0014</NoWarn>
+    <GameDir Condition="'$(CUPHEAD_PATH)' != ''">$(CUPHEAD_PATH)</GameDir>
+    <GameDir Condition="'$(GameDir)' == ''">E:\SteamLibrary\steamapps\common\Cuphead</GameDir>
+    <ManagedDir>$(GameDir)\Cuphead_Data\Managed</ManagedDir>
   </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>E:\SteamLibrary\steamapps\common\Cuphead\Cuphead_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestModule">
-      <HintPath>E:\SteamLibrary\steamapps\common\Cuphead\Cuphead_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <HintPath>$(ManagedDir)\UnityEngine.UnityWebRequestModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Compile Include="..\..\src\Coophead\InputFrame.cs" Link="InputFrame.cs" />

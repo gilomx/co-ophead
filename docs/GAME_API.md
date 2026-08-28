@@ -85,6 +85,39 @@ One sea Cuphead, o Cuphead cuando Player One sea Mugman.
 - `PlayerData.Data.CurrentMap`: mapa del guardado activo.
 - `Level.Current.CurrentLevel`: nivel en ejecución cuando existe una instancia.
 
+## Frontend confirmado
+
+La primera lista de la captura vive en `scene_slot_select` y la controla
+`SlotSelectScreen`:
+
+- `mainMenuItems` y `_availableMainMenuItems` son arreglos paralelos;
+- `UpdateMainMenu()` navega por la longitud de esos arreglos y no ejecuta nada para
+  valores de enum desconocidos;
+- `UITextAnimator.SetString()` conserva la animación tipográfica al cambiar etiquetas;
+- `SceneLoader.icon` contiene el reloj de arena animado de las pantallas de carga;
+- `GUIUtility.systemCopyBuffer` permite copiar el código de sala.
+
+La integración `0.12.1` inserta un valor centinela después de **EMPEZAR**, intercepta
+su confirmación con Harmony y clona el bloque tipográfico del menú antes de modificar
+su layout. Para los estados de espera clona únicamente `SceneLoader.icon` y dispara
+su animación `Hourglass`; no instancia otro `SceneLoader` ni extrae o redistribuye
+recursos del juego.
+
+Mientras una sesión online permanece activa en `scene_slot_select`, las lecturas de
+`AnyPlayerInput` del frontend se limitan transitoriamente a Player One. Así el host
+conserva el control exclusivo del menú, del save y del personaje; el arreglo original
+de jugadores se restaura después de cada lectura y el gameplay no se modifica.
+
+## Política provisional de sesión
+
+Cuphead mantiene un solo `PlayerData.CurrentSaveFileIndex` para la partida y loadouts
+separados por `PlayerId`. Por eso el host elige el save autoritativo y el cliente
+bloquea `PlayerData.SaveCurrentFile()` durante la conexión. `player1IsMugman` basta
+para garantizar personajes distintos: Player Two usa automáticamente el opuesto.
+Por ahora el protocolo transmite el índice y contexto del save, no todos sus datos;
+el invitado necesita un slot compatible y cualquier cambio local permanece sin
+guardarse durante la sesión.
+
 ## Repetir la inspección
 
 ```powershell

@@ -5,7 +5,7 @@ namespace Coophead.Transport
     internal static class LanPlayerStatePacketCodec
     {
         public const byte PacketType = 11;
-        public const int PacketSize = 30;
+        public const int PacketSize = 32;
 
         public static byte[] Encode(PlayerStateSnapshot state)
         {
@@ -22,6 +22,8 @@ namespace Coophead.Transport
             WriteFloat(packet, 24, state.PlayerTwoY);
             packet[28] = state.PlayerOneHealth;
             packet[29] = state.PlayerTwoHealth;
+            packet[30] = unchecked((byte)state.PlayerOneMapHorizontal);
+            packet[31] = unchecked((byte)state.PlayerOneMapVertical);
             return packet;
         }
 
@@ -41,6 +43,8 @@ namespace Coophead.Transport
             state.PlayerTwoY = ReadFloat(packet, 24);
             state.PlayerOneHealth = packet[28];
             state.PlayerTwoHealth = packet[29];
+            state.PlayerOneMapHorizontal = unchecked((sbyte)packet[30]);
+            state.PlayerOneMapVertical = unchecked((sbyte)packet[31]);
             return state.Tick != 0 && (state.PresentMask & ~3) == 0 && (state.DeadMask & ~3) == 0;
         }
 

@@ -37,12 +37,16 @@ LanPort = 27182
 ```
 
 3. Abre Cuphead y pulsa `F8`. El host dirigirá sus cambios de escena.
-4. Usa el teclado numérico. Los frames se envían al host por UDP.
+4. Usa los controles que tengas configurados en Cuphead. Como respaldo, las flechas,
+   `WASD` o `Numpad 4/6` y `Numpad 2/8` controlan el movimiento. Los frames se
+   envían al host por UDP. En una VM, su ventana debe tener el foco y el controlador
+   debe estar conectado o capturado por el sistema invitado.
 
 ## Resultado esperado
 
-Player Two aparece en el host y responde al teclado numérico del cliente. Al cambiar
-de mapa o entrar a un nivel, el cliente carga la misma escena localmente.
+Player Two aparece en el host y responde a los controles configurados del cliente (o
+al teclado numérico de respaldo). Al cambiar de mapa o entrar a un nivel, el cliente
+carga la misma escena localmente.
 
 Co-ophead también envía un contexto fiable con el slot seleccionado, personaje
 principal, dificultad, mapa y nivel. El sender lo imprime como `contexto #N`. Un
@@ -62,7 +66,7 @@ segundo y el cliente no corrige todavía su simulación local.
 - Cada paquete contiene un frame; el estado mantenido del siguiente paquete repara
   liberaciones perdidas, pero aún no hay métricas de pérdida ni jitter buffer.
 - El puerto no debe exponerse directamente a Internet.
-- Hay ping periódico y timeout de cinco segundos; una desconexión vuelve al estado de
+- Hay ping periódico y timeout de quince segundos para tolerar cargas de escena; una desconexión vuelve al estado de
   espera/búsqueda sin reiniciar el juego.
 - El sender de desarrollo resume el ping cada cinco segundos para mantener legible la
   secuencia de conexión y escenas.

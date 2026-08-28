@@ -37,4 +37,22 @@ namespace Coophead.Patches
             RemoteInputLab.EnsureMultiplayerState();
         }
     }
+
+    [HarmonyPatch(typeof(Level), "CreatePlayers")]
+    internal static class LevelCreatePlayersPatch
+    {
+        private static void Prefix()
+        {
+            RemoteInputLab.EnsureMultiplayerState();
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerData), "SaveCurrentFile")]
+    internal static class ClientSaveProtectionPatch
+    {
+        private static bool Prefix()
+        {
+            return !RemoteInputLab.PreventLocalSave;
+        }
+    }
 }
