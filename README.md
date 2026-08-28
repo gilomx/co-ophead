@@ -4,9 +4,9 @@ Experimento de multijugador cooperativo nativo para **Cuphead en Windows/Steam**
 En lugar de transmitir video como Steam Remote Play, cada equipo ejecuta su propia
 copia del juego y el mod intercambia entradas y una cantidad pequeña de estado.
 
-## Descargar la prueba 0.11.2
+## Descargar la prueba 0.12.6
 
-**[Descargar Co-ophead 0.11.2 para Windows x64](https://github.com/gilomx/co-ophead/raw/refs/heads/main/releases/Coophead-0.11.2-Windows-x64.zip)**
+**[Descargar Co-ophead 0.12.6 para Windows x64](https://github.com/gilomx/co-ophead/raw/refs/heads/main/releases/Coophead-0.12.6-Windows-x64.zip)**
 
 Es un paquete universal: el host y el invitado instalan exactamente el mismo ZIP.
 Ya incluye BepInEx 5.4.23.4, Co-ophead y la configuración P2P; no requiere VPN,
@@ -49,10 +49,24 @@ La superficie de integración confirmada está en [docs/GAME_API.md](docs/GAME_A
 
 ## Estado
 
-La descarga estable sigue siendo `0.11.2`. La rama principal prepara `0.12.4`: añade
+La prueba actual es `0.12.6`: añade
 **CO-OPHEAD** al primer menú con la misma tipografía y composición del frontend,
 permite copiar el código de sala, muestra el reloj de arena original durante la
-conexión y separa correctamente Player One/Player Two en el invitado.
+conexión y separa correctamente Player One/Player Two en el invitado. También muestra
+ping y pérdida estimada, evita que los snapshots retrasados frenen a Player Two y
+pausa ambos juegos si uno deja de enviar frames, con reanudación coordinada en tres
+segundos.
+
+Al entrar a un nivel, ambos equipos conservan el iris y el reloj de arena hasta que
+el invitado confirma que `Level.Start` terminó. Si la espera supera dos segundos, el
+host muestra `TU INVITADO TALENTO...`; al quedar ambos listos, el iris se abre con la
+transición original y sin una cuenta regresiva visible.
+
+> **Nota de prueba:** este paquete mantiene temporalmente `RunInBackground = true`
+> para que una sola persona pueda alternar entre el host y una VM. El producto final
+> lo tendrá desactivado: perder el foco pausará la sesión y mostrará el aviso de espera.
+> Se puede ensayar desde ahora cambiando el valor a `false` en
+> `BepInEx/config/mx.gilomx.coophead.cfg` en el host.
 
 En una sesión, el host elige el único save autoritativo. El invitado no escribe su
 progreso local mientras está conectado. Cuphead asigna automáticamente al segundo
@@ -72,12 +86,12 @@ En esta máquina Cuphead está en
 `Directory.Build.props` y editarla.
 
 Para probar manualmente, copia `src/Coophead/bin/Debug/net35/Coophead.dll` a
-`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.12.4
+`Cuphead/BepInEx/plugins/Coophead/`, inicia el juego y busca `Co-ophead 0.12.6
 cargado` en `BepInEx/LogOutput.log`.
 
 ### Remote Input Lab
 
-La versión de desarrollo `0.12.4` puede crear y controlar localmente a Player Two sin un segundo
+La versión de desarrollo `0.12.6` puede crear y controlar localmente a Player Two sin un segundo
 mando. Pulsa `F8` desde el título y después entra normalmente a una partida guardada.
 Cuphead creará a ambos jugadores al cargar el mapa:
 
@@ -117,9 +131,12 @@ integración con el juego.
 
 También está disponible el primer transporte UDP para dos equipos en una red local.
 Consulta [docs/LAN_TEST.md](docs/LAN_TEST.md). La posición de ambos jugadores ya se
-corrige con snapshots básicos tanto en el mapa como dentro de niveles; enemigos,
-animaciones y combate todavía requieren una
-sincronización más completa.
+corrige con snapshots básicos tanto en el mapa como dentro de niveles. En el invitado,
+Player Two conserva predicción local mientras hay input y solo acepta una corrección
+fuerte cuando la diferencia es grande. Si cualquiera de los juegos deja de producir
+frames, la sesión se oscurece y queda pausada hasta completar una cuenta regresiva
+coordinada. Enemigos, animaciones y combate todavía requieren una sincronización más
+completa.
 
 ## Alcance y límites
 

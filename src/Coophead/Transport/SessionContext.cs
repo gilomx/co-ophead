@@ -6,11 +6,15 @@ namespace Coophead.Transport
         public byte SaveSlot;
         public byte Flags;
         public byte Difficulty;
+        public byte ResumeSeconds;
         public int CurrentMap;
         public int CurrentLevel;
 
         public bool HasSave => (Flags & 1) != 0;
         public bool PlayerOneIsMugman => (Flags & 2) != 0;
         public bool IsInLevel => (Flags & 4) != 0;
+        public bool SessionSuspended => (Flags & 8) != 0;
+        public bool SessionResuming => (Flags & 16) != 0;
+        public bool LevelGateReleased => (Flags & 32) != 0;
     }
 }

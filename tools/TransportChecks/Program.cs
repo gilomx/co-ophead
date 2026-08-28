@@ -10,6 +10,7 @@ var sent = new InputFrame
     Held = InputButtons.Jump,
     Pressed = InputButtons.Jump,
     Released = InputButtons.Dash,
+    Flags = InputFrameFlags.WaitingForHost | InputFrameFlags.LevelReady,
 };
 
 transport.Send(sent);
@@ -24,6 +25,10 @@ Assert(received.Vertical == -127, "El transporte alteró el eje vertical.");
 Assert(received.HasHeld(InputButtons.Jump), "El transporte perdió botones mantenidos.");
 Assert(received.HasPressed(InputButtons.Jump), "El transporte perdió el borde de pulsación.");
 Assert(received.HasReleased(InputButtons.Dash), "El transporte perdió el borde de liberación.");
+Assert((received.Flags & InputFrameFlags.WaitingForHost) != 0,
+    "El transporte perdió el estado de espera del invitado.");
+Assert((received.Flags & InputFrameFlags.LevelReady) != 0,
+    "El transporte perdió la confirmación de nivel listo.");
 Assert(!transport.TryReceive(13, out _), "El transporte entregó el mismo frame dos veces.");
 
 transport.Reset();
@@ -37,7 +42,8 @@ var encoded = InputFramePacketCodec.Encode(sent);
 Assert(encoded.Length == InputFramePacketCodec.PacketSize, "El codec produjo un tamaño inesperado.");
 Assert(InputFramePacketCodec.TryDecode(encoded, out var decoded), "El codec rechazó un paquete válido.");
 Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
-    decoded.Vertical == sent.Vertical && decoded.Held == sent.Held,
+    decoded.Vertical == sent.Vertical && decoded.Held == sent.Held &&
+    decoded.Flags == sent.Flags,
     "El codec alteró el InputFrame.");
 encoded[4]++;
 Assert(!InputFramePacketCodec.TryDecode(encoded, out _), "El codec aceptó otro protocolo.");
@@ -133,8 +139,9 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     host.SendContext(new SessionContext
     {
         SaveSlot = 1,
-        Flags = 1 | 2 | 4,
+        Flags = 1 | 2 | 4 | 8 | 16 | 32,
         Difficulty = 2,
+        ResumeSeconds = 3,
         CurrentMap = 6,
         CurrentLevel = 42,
     });
@@ -152,6 +159,9 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     Assert(contextArrived, "El contexto fiable de sesión no llegó.");
     Assert(receivedContext.SaveSlot == 1 && receivedContext.PlayerOneIsMugman &&
         receivedContext.IsInLevel && receivedContext.Difficulty == 2 &&
+        receivedContext.SessionSuspended && receivedContext.SessionResuming &&
+        receivedContext.LevelGateReleased &&
+        receivedContext.ResumeSeconds == 3 &&
         receivedContext.CurrentMap == 6 && receivedContext.CurrentLevel == 42,
         "El transporte alteró el contexto de sesión.");
     Assert(receivedContext.Sequence != 0, "El contexto llegó sin secuencia.");
@@ -193,6 +203,18 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         receivedState.PlayerOneMapHorizontal == -127 &&
         receivedState.PlayerOneMapVertical == 64,
         "El transporte alteró el snapshot de jugadores.");
+
+    for (var attempt = 0; attempt < 100 &&
+        (host.PingMilliseconds < 0 || client.PingMilliseconds < 0); attempt++)
+    {
+        host.Update(); client.Update(); host.Update();
+        Thread.Sleep(5);
+    }
+    Assert(host.PingMilliseconds >= 0 && client.PingMilliseconds >= 0,
+        "El transporte no midió el ping en ambos sentidos.");
+    Assert(host.EstimatedPacketLossPercent == 0 &&
+        client.EstimatedPacketLossPercent == 0,
+        "El transporte reportó pérdidas en la prueba local sin pérdida.");
 }
 
 var rejectPort = port + 1;

@@ -3,6 +3,14 @@ using System;
 namespace Coophead
 {
     [Flags]
+    internal enum InputFrameFlags : byte
+    {
+        None = 0,
+        WaitingForHost = 1 << 0,
+        LevelReady = 1 << 1,
+    }
+
+    [Flags]
     internal enum InputButtons : uint
     {
         None = 0,
@@ -24,6 +32,7 @@ namespace Coophead
         public uint Tick;
         public sbyte Horizontal;
         public sbyte Vertical;
+        public InputFrameFlags Flags;
         public InputButtons Held;
         public InputButtons Pressed;
         public InputButtons Released;

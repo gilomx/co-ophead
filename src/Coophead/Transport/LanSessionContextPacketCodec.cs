@@ -16,7 +16,7 @@ namespace Coophead.Transport
             packet[10] = context.SaveSlot;
             packet[11] = context.Flags;
             packet[12] = context.Difficulty;
-            packet[13] = 0;
+            packet[13] = context.ResumeSeconds;
             WriteUInt32(packet, 14, unchecked((uint)context.CurrentMap));
             WriteUInt32(packet, 18, unchecked((uint)context.CurrentLevel));
             return packet;
@@ -35,6 +35,7 @@ namespace Coophead.Transport
             context.SaveSlot = packet[10];
             context.Flags = packet[11];
             context.Difficulty = packet[12];
+            context.ResumeSeconds = packet[13];
             context.CurrentMap = unchecked((int)ReadUInt32(packet, 14));
             context.CurrentLevel = unchecked((int)ReadUInt32(packet, 18));
             return context.Sequence != 0 && context.Difficulty <= 2;

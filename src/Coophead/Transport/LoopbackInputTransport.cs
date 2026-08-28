@@ -20,6 +20,7 @@ namespace Coophead.Transport
         public string Status => "conectado";
         public bool IsConnected => true;
         public int PingMilliseconds => 0;
+        public int EstimatedPacketLossPercent => 0;
 
         public void Update()
         {

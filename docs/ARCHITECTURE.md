@@ -77,7 +77,8 @@ Esta fase separa errores de integración de errores de red.
 - handshake estricto de versiones;
 - UDP o transporte intercambiable de laboratorio;
 - sincronizar entrada, carga de escena y reintento;
-- medir pérdida, jitter, RTT y desync.
+- retener el iris de los niveles hasta recibir la confirmación `LevelReady`;
+- medir pérdida y RTT; añadir después jitter y métricas de desync.
 
 ### Fase 3 — Steam P2P
 

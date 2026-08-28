@@ -35,6 +35,9 @@ namespace Coophead.Transport
         private bool hasPendingContext;
         private uint nextContextSequence = 1;
         private uint lastReceivedContextSequence;
+        private uint lastReceivedPlayerStateTick;
+        private long receivedRealtimePackets;
+        private long estimatedMissingRealtimePackets;
 
         private UdpInputTransport(Socket socket, bool host, EndPoint target,
             string description, uint versionToken)
@@ -52,6 +55,17 @@ namespace Coophead.Transport
         public string Status { get; private set; }
         public bool IsConnected { get; private set; }
         public int PingMilliseconds { get; private set; }
+        public int EstimatedPacketLossPercent
+        {
+            get
+            {
+                var total = receivedRealtimePackets + estimatedMissingRealtimePackets;
+                if (total <= 0)
+                    return -1;
+                return (int)Math.Min(100L,
+                    estimatedMissingRealtimePackets * 100L / total);
+            }
+        }
 
         public static UdpInputTransport CreateHost(int port, uint versionToken)
         {
@@ -99,6 +113,9 @@ namespace Coophead.Transport
             PingMilliseconds = -1;
             lastReceivedSceneSequence = 0;
             lastReceivedContextSequence = 0;
+            lastReceivedPlayerStateTick = 0;
+            receivedRealtimePackets = 0;
+            estimatedMissingRealtimePackets = 0;
             DrainSocket();
         }
 
@@ -122,7 +139,7 @@ namespace Coophead.Transport
                 lastHelloSentUtc = now;
                 Status = "abriendo ruta P2P";
             }
-            if (!host && IsConnected && now - lastPingSentUtc >= RetryInterval)
+            if (IsConnected && now - lastPingSentUtc >= RetryInterval)
             {
                 SendControl(LanControlPacketCodec.Ping, unchecked((uint)Environment.TickCount), peer);
                 lastPingSentUtc = now;
@@ -293,6 +310,7 @@ namespace Coophead.Transport
                 if (!host && IsConnected && SameEndpoint(sender, peer))
                 {
                     lastPacketReceivedUtc = now;
+                    RecordPlayerStatePacket(playerState.Tick);
                     while (receivedPlayerStates.Count > 0)
                         receivedPlayerStates.Dequeue();
                     receivedPlayerStates.Enqueue(playerState);
@@ -308,6 +326,7 @@ namespace Coophead.Transport
                 return;
             frame.Pressed = frame.Held & ~lastReceivedHeld;
             frame.Released = lastReceivedHeld & ~frame.Held;
+            RecordInputPacket(frame.Tick);
             lastReceivedHeld = frame.Held;
             lastReceivedTick = frame.Tick;
             lastPacketReceivedUtc = now;
@@ -348,19 +367,19 @@ namespace Coophead.Transport
                 IsConnected = false;
                 return;
             }
-            if (host && IsConnected && type == LanControlPacketCodec.Ping && SameEndpoint(sender, peer))
+            if (IsConnected && type == LanControlPacketCodec.Ping && SameEndpoint(sender, peer))
             {
                 lastPacketReceivedUtc = now;
                 SendControl(LanControlPacketCodec.Pong, value, peer);
                 return;
             }
-            if (!host && IsConnected && type == LanControlPacketCodec.Pong && SameEndpoint(sender, peer))
+            if (IsConnected && type == LanControlPacketCodec.Pong && SameEndpoint(sender, peer))
             {
                 lastPacketReceivedUtc = now;
                 PingMilliseconds = unchecked(Environment.TickCount - (int)value);
                 if (PingMilliseconds < 0)
                     PingMilliseconds = 0;
-                Status = "conectado al host";
+                Status = host ? "cliente conectado: " + peer : "conectado al host";
                 return;
             }
             if (host && IsConnected && type == LanControlPacketCodec.SceneAck &&
@@ -389,7 +408,33 @@ namespace Coophead.Transport
             receivedContexts.Clear();
             receivedPlayerStates.Clear();
             PingMilliseconds = -1;
+            lastReceivedPlayerStateTick = 0;
+            receivedRealtimePackets = 0;
+            estimatedMissingRealtimePackets = 0;
             Status = status;
+        }
+
+        private void RecordInputPacket(uint tick)
+        {
+            if (lastReceivedTick != 0)
+            {
+                var gap = unchecked((int)(tick - lastReceivedTick));
+                if (gap > 1)
+                    estimatedMissingRealtimePackets += gap - 1;
+            }
+            receivedRealtimePackets++;
+        }
+
+        private void RecordPlayerStatePacket(uint tick)
+        {
+            if (lastReceivedPlayerStateTick != 0)
+            {
+                var gap = unchecked((int)(tick - lastReceivedPlayerStateTick));
+                if (gap > 3 && gap <= 30)
+                    estimatedMissingRealtimePackets += Math.Max(0, gap / 3 - 1);
+            }
+            lastReceivedPlayerStateTick = tick;
+            receivedRealtimePackets++;
         }
 
         private void SendControl(byte type, uint value, EndPoint destination)

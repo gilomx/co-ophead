@@ -9,7 +9,10 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x001204;
+        private const uint ModVersionToken = 0x001206;
+        private const float PeerStallSeconds = 1.25f;
+        private const float ResumeCountdownSeconds = 3f;
+        private const float LongWaitSeconds = 15f;
 
         private static readonly System.Reflection.MethodInfo MapPlayerJoinedMethod =
             AccessTools.Method(typeof(Map), "OnPlayerJoined", new[] { typeof(PlayerId) });
@@ -37,6 +40,7 @@ namespace Coophead
         private static string lastTransportStatus;
         private static bool originalRunInBackground;
         private static bool runInBackgroundCaptured;
+        private static bool runInBackgroundForTesting = true;
         private static SessionContext lastSentContext;
         private static bool hasLastSentContext;
         private static SessionContext latestRemoteContext;
@@ -72,6 +76,19 @@ namespace Coophead
         private static Level.Mode originalClientDifficulty;
         private static bool originalClientInGame;
         private static bool originalClientContextCaptured;
+        private static SessionHoldState sessionHoldState;
+        private static string sessionHoldReason = string.Empty;
+        private static float sessionHoldStartedRealtime;
+        private static float resumeDeadlineRealtime;
+        private static byte lastResumeSecondsSent = byte.MaxValue;
+        private static bool pauseAppliedBySession;
+        private static bool timeScalePausedBySession;
+        private static float previousSessionTimeScale = 1f;
+        private static bool levelGatePauseRequested;
+        private static float lastRemoteInputRealtime;
+        private static bool hasRemoteInputActivity;
+        private static bool remoteClientWaiting;
+        private static bool clientHoldAcknowledgedByHost;
 
         public static bool Enabled { get; private set; }
         private static bool IsHost => transportMode == InputTransportMode.LanHost ||
@@ -85,6 +102,27 @@ namespace Coophead
         public static bool IsSamplingLocalInput => samplingLocalInput;
         public static bool PreventLocalSave => IsClientSession;
         public static string TransportStatus => transport.Status;
+        public static int PingMilliseconds => transport.PingMilliseconds;
+        public static int EstimatedPacketLossPercent =>
+            transport.EstimatedPacketLossPercent;
+        public static bool SessionOverlayVisible => Enabled &&
+            sessionHoldState != SessionHoldState.None;
+        public static bool SessionIsResuming =>
+            sessionHoldState == SessionHoldState.Resuming;
+        public static string SessionHoldReason => sessionHoldReason;
+        public static int SessionResumeSeconds
+        {
+            get
+            {
+                if (!SessionIsResuming)
+                    return 0;
+                return Mathf.Max(1, Mathf.CeilToInt(
+                    resumeDeadlineRealtime - Time.realtimeSinceStartup));
+            }
+        }
+        public static bool CanLeaveInterruptedSession => SessionOverlayVisible &&
+            !SessionIsResuming &&
+            Time.realtimeSinceStartup - sessionHoldStartedRealtime >= LongWaitSeconds;
         public static string CurrentRoomCode
         {
             get
@@ -94,6 +132,13 @@ namespace Coophead
                 var p2p = transport as P2pInputTransport;
                 return p2p == null ? string.Empty : p2p.RoomCode;
             }
+        }
+
+        public static void SetRunInBackgroundForTesting(bool enabled)
+        {
+            runInBackgroundForTesting = enabled;
+            Plugin.Log.LogInfo("[Testing] RunInBackground temporal: " +
+                (enabled ? "ACTIVADO" : "DESACTIVADO") + ".");
         }
 
         public static void StartInternet(bool host, string signalingUrl, string stunHost,
@@ -112,6 +157,7 @@ namespace Coophead
             if (!Enabled)
                 return;
 
+            LevelLoadGate.Reset();
             TryLeavePlayerTwo();
             SetEnabled(false);
             var previousTransport = transport;
@@ -171,13 +217,15 @@ namespace Coophead
                 runInBackgroundCaptured = true;
             }
             if (mode != InputTransportMode.Loopback)
-                Application.runInBackground = true;
+                Application.runInBackground = runInBackgroundForTesting;
             Plugin.Log.LogInfo("[InputLab] Transporte configurado: " + transport.Description);
         }
 
         public static void Shutdown()
         {
+            LevelLoadGate.Reset();
             RestoreClientContext();
+            ResetSessionHoldState(true);
             Enabled = false;
             ResetRemotePlayerState();
             transport.Dispose();
@@ -209,6 +257,7 @@ namespace Coophead
             ProcessSessionContexts();
             ProcessSceneCommands();
             ProcessPlayerStates();
+            LevelLoadGate.Update();
 
             EnsureMultiplayerState();
             EnsurePlayerTwoPresent();
@@ -232,6 +281,17 @@ namespace Coophead
                 {
                     var sampled = SampleConfiguredPlayerInput();
                     sampled.Tick = sourceTick;
+                    if (sessionHoldState != SessionHoldState.None ||
+                        LevelLoadGate.IsHoldingGameplay)
+                    {
+                        sampled.Horizontal = 0;
+                        sampled.Vertical = 0;
+                        sampled.Held = InputButtons.None;
+                    }
+                    if (sessionHoldState != SessionHoldState.None)
+                        sampled.Flags |= InputFrameFlags.WaitingForHost;
+                    if (LevelLoadGate.ShouldReportReady)
+                        sampled.Flags |= InputFrameFlags.LevelReady;
                     sampled.Pressed = sampled.Held & ~previousHeld;
                     sampled.Released = previousHeld & ~sampled.Held;
                     previousHeld = sampled.Held;
@@ -302,15 +362,30 @@ namespace Coophead
                             received.Horizontal + " V=" + received.Vertical + " botones=" +
                             (uint)received.Held + ".");
                     }
+                    lastRemoteInputRealtime = Time.realtimeSinceStartup;
+                    hasRemoteInputActivity = true;
+                    var clientWaiting = (received.Flags &
+                        InputFrameFlags.WaitingForHost) != 0;
+                    if (clientWaiting && !remoteClientWaiting && IsHost)
+                        BeginHostResumeCountdown("El invitado espera al anfitrión.");
+                    remoteClientWaiting = clientWaiting;
+                    if ((received.Flags & InputFrameFlags.LevelReady) != 0 &&
+                        LevelLoadGate.OnGuestReady())
+                        CaptureAndSendContext(true);
                 }
             }
+
+            UpdateSessionHold();
 
         }
 
         private static void SetEnabled(bool enabled)
         {
             if (!enabled)
+            {
                 RestoreClientContext();
+                ResetSessionHoldState(true);
+            }
             Enabled = enabled;
             previousHeld = InputButtons.None;
             received = new InputFrame();
@@ -338,10 +413,226 @@ namespace Coophead
             hostMapAxesReported = false;
             remoteMapAxesReported = false;
             playerOneVisualReported = false;
+            lastRemoteInputRealtime = 0f;
+            hasRemoteInputActivity = false;
+            remoteClientWaiting = false;
+            clientHoldAcknowledgedByHost = false;
+            if (enabled)
+                ResetSessionHoldState(false);
             if (enabled && IsClient)
                 CaptureOriginalClientContext();
             Plugin.Log.LogMessage("Remote Input Lab " + (Enabled ? "ACTIVADO" : "DESACTIVADO") +
                 (Enabled ? " (" + transport.Description + ")." : "."));
+        }
+
+        private static void UpdateSessionHold()
+        {
+            if (!Enabled)
+                return;
+
+            if (sessionHoldState != SessionHoldState.None)
+                ApplySessionPause();
+
+            var now = Time.realtimeSinceStartup;
+            if (IsHost)
+            {
+                if (transport.IsConnected && hasRemoteInputActivity &&
+                    sessionHoldState == SessionHoldState.None &&
+                    now - lastRemoteInputRealtime >= PeerStallSeconds)
+                {
+                    EnterSessionWait("Esperando al invitado.");
+                    CaptureAndSendContext(true);
+                }
+                else if (transport.IsConnected && hasRemoteInputActivity &&
+                    sessionHoldState == SessionHoldState.Waiting &&
+                    now - lastRemoteInputRealtime < 0.25f)
+                {
+                    BeginHostResumeCountdown("El invitado volvió.");
+                }
+
+                if (sessionHoldState == SessionHoldState.Resuming)
+                    UpdateHostResumeCountdown(now);
+                return;
+            }
+
+            if (!IsClient || sessionHoldState != SessionHoldState.None ||
+                !hasRemotePlayerState)
+                return;
+            if (now - lastRemotePlayerStateRealtime >= PeerStallSeconds)
+                EnterSessionWait("Esperando al anfitrión.");
+        }
+
+        private static void EnterSessionWait(string reason)
+        {
+            if (sessionHoldState == SessionHoldState.Waiting)
+            {
+                if (!string.IsNullOrEmpty(reason))
+                    sessionHoldReason = reason;
+                return;
+            }
+
+            sessionHoldState = SessionHoldState.Waiting;
+            sessionHoldReason = string.IsNullOrEmpty(reason) ?
+                "Esperando al otro jugador." : reason;
+            sessionHoldStartedRealtime = Time.realtimeSinceStartup;
+            resumeDeadlineRealtime = 0f;
+            lastResumeSecondsSent = byte.MaxValue;
+            received = new InputFrame();
+            ApplySessionPause();
+            Plugin.Log.LogWarning("[SessionHold] " + sessionHoldReason);
+        }
+
+        private static void BeginHostResumeCountdown(string reason)
+        {
+            if (!IsHostSession || !transport.IsConnected ||
+                sessionHoldState == SessionHoldState.Resuming)
+                return;
+            if (sessionHoldState == SessionHoldState.None)
+                EnterSessionWait(reason);
+
+            sessionHoldState = SessionHoldState.Resuming;
+            sessionHoldReason = "El compañero volvió. Reanudando la partida.";
+            resumeDeadlineRealtime = Time.realtimeSinceStartup + ResumeCountdownSeconds;
+            lastResumeSecondsSent = byte.MaxValue;
+            received = new InputFrame();
+            ApplySessionPause();
+            CaptureAndSendContext(true);
+            Plugin.Log.LogMessage("[SessionHold] Ambos jugadores listos; cuenta regresiva iniciada.");
+        }
+
+        private static void UpdateHostResumeCountdown(float now)
+        {
+            var remaining = Mathf.Max(0, Mathf.CeilToInt(resumeDeadlineRealtime - now));
+            var encoded = (byte)Mathf.Clamp(remaining, 0, 255);
+            if (encoded != lastResumeSecondsSent)
+            {
+                lastResumeSecondsSent = encoded;
+                CaptureAndSendContext(true);
+            }
+            if (now < resumeDeadlineRealtime)
+                return;
+
+            sessionHoldState = SessionHoldState.None;
+            sessionHoldReason = string.Empty;
+            received = new InputFrame();
+            ReleaseSessionPause();
+            CaptureAndSendContext(true);
+            Plugin.Log.LogMessage("[SessionHold] Partida reanudada.");
+        }
+
+        private static void ApplyClientSessionHold(SessionContext context)
+        {
+            if (!IsClient)
+                return;
+
+            if (context.SessionResuming)
+            {
+                clientHoldAcknowledgedByHost = true;
+                if (sessionHoldState == SessionHoldState.None)
+                    EnterSessionWait("Esperando al anfitrión.");
+                sessionHoldState = SessionHoldState.Resuming;
+                sessionHoldReason = "El anfitrión volvió. Reanudando la partida.";
+                resumeDeadlineRealtime = Time.realtimeSinceStartup +
+                    Mathf.Max(1, context.ResumeSeconds);
+                ApplySessionPause();
+                return;
+            }
+
+            if (context.SessionSuspended)
+            {
+                clientHoldAcknowledgedByHost = true;
+                EnterSessionWait("Esperando al anfitrión.");
+                return;
+            }
+
+            if (sessionHoldState == SessionHoldState.None ||
+                !clientHoldAcknowledgedByHost)
+                return;
+            sessionHoldState = SessionHoldState.None;
+            sessionHoldReason = string.Empty;
+            clientHoldAcknowledgedByHost = false;
+            received = new InputFrame();
+            previousHeld = InputButtons.None;
+            ReleaseSessionPause();
+            Plugin.Log.LogMessage("[SessionHold] El invitado reanudó la partida.");
+        }
+
+        private static void ApplySessionPause()
+        {
+            try
+            {
+                if (PauseManager.state != PauseManager.State.Paused)
+                {
+                    PauseManager.Pause();
+                    pauseAppliedBySession = true;
+                }
+                if (PauseManager.state == PauseManager.State.Paused)
+                    return;
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning("[SessionHold] No se pudo pausar Cuphead: " + ex.Message);
+            }
+
+            if (!timeScalePausedBySession && Time.timeScale != 0f)
+            {
+                previousSessionTimeScale = Time.timeScale;
+                Time.timeScale = 0f;
+                timeScalePausedBySession = true;
+            }
+        }
+
+        private static void ReleaseSessionPause()
+        {
+            if (sessionHoldState != SessionHoldState.None || levelGatePauseRequested)
+                return;
+            if (!pauseAppliedBySession)
+            {
+                if (timeScalePausedBySession)
+                {
+                    Time.timeScale = previousSessionTimeScale;
+                    timeScalePausedBySession = false;
+                }
+                return;
+            }
+
+            pauseAppliedBySession = false;
+            try
+            {
+                if (PauseManager.state == PauseManager.State.Paused)
+                    PauseManager.Unpause();
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning("[SessionHold] No se pudo reanudar Cuphead: " + ex.Message);
+            }
+            if (timeScalePausedBySession)
+            {
+                Time.timeScale = previousSessionTimeScale;
+                timeScalePausedBySession = false;
+            }
+        }
+
+        public static void SetLevelGatePause(bool paused)
+        {
+            levelGatePauseRequested = paused;
+            if (paused)
+                ApplySessionPause();
+            else
+                ReleaseSessionPause();
+        }
+
+        private static void ResetSessionHoldState(bool releasePause)
+        {
+            sessionHoldState = SessionHoldState.None;
+            sessionHoldReason = string.Empty;
+            sessionHoldStartedRealtime = 0f;
+            resumeDeadlineRealtime = 0f;
+            lastResumeSecondsSent = byte.MaxValue;
+            clientHoldAcknowledgedByHost = false;
+            remoteClientWaiting = false;
+            if (releasePause)
+                ReleaseSessionPause();
         }
 
         public static void EnsureMultiplayerState()
@@ -619,6 +910,10 @@ namespace Coophead
             }
             else if (!connected && transportWasConnected)
             {
+                if (IsClient)
+                    EnterSessionWait("Se perdió la señal del anfitrión. Reconectando.");
+                else if (IsHost)
+                    EnterSessionWait("Se perdió la señal del invitado. Reconectando.");
                 lateSpawnAttempted = false;
                 ResetLateSpawnRecovery();
                 received = new InputFrame();
@@ -626,6 +921,7 @@ namespace Coophead
                 ResetRemotePlayerState();
                 hasRemoteContext = false;
                 hasPendingRemoteScene = false;
+                hasRemoteInputActivity = false;
             }
             transportWasConnected = connected;
         }
@@ -645,6 +941,7 @@ namespace Coophead
 
         public static void OnSceneLoaded(string sceneName, LoadSceneMode mode)
         {
+            LevelLoadGate.OnSceneLoaded(sceneName);
             ClearRemotePlayerState();
             lateSpawnAttempted = false;
             ResetLateSpawnRecovery();
@@ -769,8 +1066,13 @@ namespace Coophead
                     SaveSlot = (byte)UnityEngine.Mathf.Clamp(PlayerData.CurrentSaveFileIndex, 0, 2),
                     Flags = (byte)((hasActiveSave ? 1 : 0) |
                         (PlayerManager.player1IsMugman ? 2 : 0) |
-                        (Level.Current != null ? 4 : 0)),
+                        (Level.Current != null ? 4 : 0) |
+                        (sessionHoldState != SessionHoldState.None ? 8 : 0) |
+                        (sessionHoldState == SessionHoldState.Resuming ? 16 : 0) |
+                        (LevelLoadGate.ReleaseAnnounced ? 32 : 0)),
                     Difficulty = (byte)Level.CurrentMode,
+                    ResumeSeconds = sessionHoldState == SessionHoldState.Resuming ?
+                        (byte)Mathf.Clamp(SessionResumeSeconds, 0, 255) : (byte)0,
                     CurrentMap = hasActiveSave ? (int)data.CurrentMap : -1,
                     CurrentLevel = Level.Current == null ? -1 : (int)Level.Current.CurrentLevel,
                 };
@@ -783,7 +1085,9 @@ namespace Coophead
                 transport.SendContext(context);
                 Plugin.Log.LogInfo("[SessionSync] Contexto enviado: slot=" + context.SaveSlot +
                     " mugman=" + context.PlayerOneIsMugman + " difficulty=" + context.Difficulty +
-                    " map=" + context.CurrentMap + " level=" + context.CurrentLevel);
+                    " map=" + context.CurrentMap + " level=" + context.CurrentLevel +
+                    " suspended=" + context.SessionSuspended + " resume=" +
+                    context.ResumeSeconds);
             }
             catch (System.Exception ex)
             {
@@ -804,9 +1108,13 @@ namespace Coophead
                 Plugin.Log.LogMessage("[SessionSync] Contexto recibido #" + context.Sequence +
                     ": slot=" + context.SaveSlot + " mugman=" + context.PlayerOneIsMugman +
                     " difficulty=" + context.Difficulty + " map=" + context.CurrentMap +
-                    " level=" + context.CurrentLevel);
+                    " level=" + context.CurrentLevel + " suspended=" +
+                    context.SessionSuspended + " resume=" + context.ResumeSeconds);
                 if (context.SaveSlot > 2 || context.Difficulty > 2)
                     continue;
+                ApplyClientSessionHold(context);
+                if (context.LevelGateReleased)
+                    LevelLoadGate.OnHostRelease(context.CurrentLevel);
                 if (!context.HasSave)
                 {
                     hasRemoteContext = false;
@@ -925,7 +1233,9 @@ namespace Coophead
         private static bool ContextEquals(SessionContext left, SessionContext right)
         {
             return left.SaveSlot == right.SaveSlot && left.Flags == right.Flags &&
-                left.Difficulty == right.Difficulty && left.CurrentMap == right.CurrentMap &&
+                left.Difficulty == right.Difficulty &&
+                left.ResumeSeconds == right.ResumeSeconds &&
+                left.CurrentMap == right.CurrentMap &&
                 left.CurrentLevel == right.CurrentLevel;
         }
 
@@ -1071,8 +1381,9 @@ namespace Coophead
                 CorrectPlayerPosition(PlayerId.PlayerOne,
                     latestRemotePlayerState.PlayerOneX, latestRemotePlayerState.PlayerOneY, true);
             if ((latestRemotePlayerState.PresentMask & 2) != 0)
-                CorrectPlayerPosition(PlayerId.PlayerTwo,
-                    latestRemotePlayerState.PlayerTwoX, latestRemotePlayerState.PlayerTwoY, false);
+                CorrectPredictedPlayerTwoPosition(
+                    latestRemotePlayerState.PlayerTwoX,
+                    latestRemotePlayerState.PlayerTwoY);
         }
 
         private static void ClearRemotePlayerState()
@@ -1137,6 +1448,44 @@ namespace Coophead
                 playerTransform.position = target;
             else if (distance > 0.05f)
                 playerTransform.position = Vector3.Lerp(current, target, 0.35f);
+        }
+
+        private static void CorrectPredictedPlayerTwoPosition(float x, float y)
+        {
+            Transform playerTransform;
+            var onMap = Map.Current != null;
+            if (onMap)
+            {
+                var players = Map.Current.players;
+                if (players == null || players.Length < 2 || players[1] == null)
+                    return;
+                playerTransform = players[1].transform;
+            }
+            else
+            {
+                AbstractPlayerController player;
+                try { player = PlayerManager.GetPlayer(PlayerId.PlayerTwo); }
+                catch { return; }
+                if (player == null)
+                    return;
+                playerTransform = player.transform;
+            }
+
+            var current = playerTransform.position;
+            var target = new Vector3(x, y, current.z);
+            var distance = Vector2.Distance(current, target);
+            var activelyPredicting = received.Horizontal != 0 || received.Vertical != 0 ||
+                received.Held != InputButtons.None;
+            var snapDistance = onMap ? 12f : 80f;
+            var idleCorrectionDistance = onMap ? 1f : 3f;
+
+            // Mientras el invitado controla a P2, una corrección suave basada en un
+            // snapshot atrasado lo arrastra hacia atrás y reduce su velocidad aparente.
+            // Solo aceptamos un salto autoritativo grande; al quedar neutral convergemos.
+            if (distance >= snapDistance)
+                playerTransform.position = target;
+            else if (!activelyPredicting && distance >= idleCorrectionDistance)
+                playerTransform.position = Vector3.Lerp(current, target, 0.15f);
         }
 
         private static void ReportPlayerTwoWhenReady()
@@ -1243,6 +1592,8 @@ namespace Coophead
             };
             MergeInput(ref sampled, arrows);
             MergeInput(ref sampled, wasd);
+            if (Input.GetKey(KeyCode.Escape))
+                sampled.Held |= InputButtons.Pause | InputButtons.Cancel;
             try
             {
                 MergeInput(ref sampled, new InputFrame
@@ -1371,5 +1722,12 @@ namespace Coophead
         Held,
         Pressed,
         Released,
+    }
+
+    internal enum SessionHoldState
+    {
+        None,
+        Waiting,
+        Resuming,
     }
 }

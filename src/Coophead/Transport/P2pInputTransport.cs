@@ -52,6 +52,10 @@ namespace Coophead.Transport
         public string RoomCode { get { return asyncRoomCode; } }
         public bool IsConnected { get { return udp != null && udp.IsConnected; } }
         public int PingMilliseconds { get { return udp == null ? -1 : udp.PingMilliseconds; } private set { } }
+        public int EstimatedPacketLossPercent
+        {
+            get { return udp == null ? -1 : udp.EstimatedPacketLossPercent; }
+        }
 
         public void Update()
         {

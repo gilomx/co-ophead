@@ -49,6 +49,7 @@ namespace Coophead.Transport
         public string RoomCode { get; private set; }
         public bool IsConnected { get; private set; }
         public int PingMilliseconds { get; private set; }
+        public int EstimatedPacketLossPercent => -1;
 
         public void Update()
         {

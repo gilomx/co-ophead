@@ -6,6 +6,7 @@ namespace Coophead.Transport
         string Status { get; }
         bool IsConnected { get; }
         int PingMilliseconds { get; }
+        int EstimatedPacketLossPercent { get; }
         void Reset();
         void Update();
         void Send(InputFrame frame);

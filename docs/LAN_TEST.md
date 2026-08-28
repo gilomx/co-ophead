@@ -56,15 +56,29 @@ guardado local.
 El host refresca el contexto cada cinco segundos para que un cliente reconectado lo
 reciba; el sender oculta refrescos idénticos y solo imprime cambios reales.
 Además, el host envía snapshots de posición, vida y muerte de ambos jugadores veinte
-veces por segundo. En esta etapa son telemetría: el sender los muestra una vez por
-segundo y el cliente no corrige todavía su simulación local.
+veces por segundo. El invitado aplica Player One como estado autoritativo. Player Two
+usa predicción local mientras recibe controles y converge al snapshot cuando queda
+neutral; una diferencia grande todavía produce una corrección inmediata.
+
+Ambos lados muestran RTT y pérdida estimada en la esquina superior derecha. Si dejan
+de llegar frames durante 1.25 segundos, la partida queda pausada bajo un overlay. El
+invitado avisa al host mediante el siguiente frame disponible y ambos reanudan después
+de una cuenta regresiva de tres segundos. Las entradas mantenidas durante la espera se
+neutralizan para que no se ejecuten acciones atrasadas al volver.
+
+Los niveles usan además una compuerta de carga. La coroutine original de `SceneLoader`
+se retiene después de `UnloadUnusedAssets` y antes de ocultar el reloj de arena. El
+invitado anuncia `LevelReady` después de `Level.Start`; el host publica la liberación
+en el contexto fiable y ambos permiten que continúe la apertura normal del iris. No
+hay una cuenta regresiva visible.
 
 ## Límites actuales
 
 - No hay cifrado, autenticación, lobby ni NAT traversal.
 - Debe usarse solo en una LAN de confianza.
 - Cada paquete contiene un frame; el estado mantenido del siguiente paquete repara
-  liberaciones perdidas, pero aún no hay métricas de pérdida ni jitter buffer.
+  liberaciones perdidas. Hay una estimación de pérdida basada en saltos de tick, pero
+  todavía no existe un jitter buffer adaptativo.
 - El puerto no debe exponerse directamente a Internet.
 - Hay ping periódico y timeout de quince segundos para tolerar cargas de escena; una desconexión vuelve al estado de
   espera/búsqueda sin reiniciar el juego.
@@ -72,6 +86,9 @@ segundo y el cliente no corrige todavía su simulación local.
   secuencia de conexión y escenas.
 - En modo LAN, Co-ophead habilita la actualización de Unity en segundo plano para que
   el handshake no expire al cambiar el foco entre Cuphead y herramientas de prueba.
+  Esto está marcado explícitamente como temporal mediante
+  `[Testing] RunInBackground = true`. El comportamiento previsto para una versión
+  final es `false`; con ese valor se prueba el overlay de espera al abandonar Cuphead.
 
 ## Prueba con una sola PC
 

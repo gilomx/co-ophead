@@ -13,7 +13,7 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.12.4";
+        public const string PluginVersion = "0.12.6";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
         internal static Plugin Instance { get; private set; }
@@ -28,6 +28,7 @@ namespace Coophead
         private ConfigEntry<string> signalingUrl;
         private ConfigEntry<string> stunHost;
         private ConfigEntry<int> stunPort;
+        private ConfigEntry<bool> runInBackgroundForTesting;
         private bool showOnlineMenu;
         private string joinCode = "";
         private string onlineMessage = "";
@@ -57,6 +58,11 @@ namespace Coophead
                 "Servidor STUN para descubrir el endpoint público.");
             stunPort = Config.Bind("P2P", "StunPort", 3478,
                 "Puerto UDP del servidor STUN.");
+            runInBackgroundForTesting = Config.Bind("Testing", "RunInBackground", true,
+                "Temporal para pruebas: mantiene Cuphead activo al cambiar de ventana. " +
+                "El comportamiento final será false.");
+            RemoteInputLab.SetRunInBackgroundForTesting(
+                runInBackgroundForTesting.Value);
             try
             {
                 RemoteInputLab.Configure(transportMode.Value, lanHostAddress.Value, lanPort.Value,
@@ -90,9 +96,113 @@ namespace Coophead
 
         private void OnGUI()
         {
-            if (!showOnlineMenu)
+            if (showOnlineMenu)
+                onlineWindow = GUI.Window(78216, onlineWindow, DrawOnlineWindow, "CO-OPHEAD");
+            DrawConnectionQualityHud();
+            DrawLevelLoadMessage();
+            DrawSessionInterruptionOverlay();
+        }
+
+        private void DrawLevelLoadMessage()
+        {
+            if (!LevelLoadGate.ShowHostWaitingMessage)
                 return;
-            onlineWindow = GUI.Window(78216, onlineWindow, DrawOnlineWindow, "CO-OPHEAD");
+
+            var style = new GUIStyle(GUI.skin.label)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 24,
+                fontStyle = FontStyle.Bold,
+            };
+            style.normal.textColor = Color.white;
+            GUI.Label(new Rect(20, Screen.height * 0.68f,
+                Screen.width - 40, 50), LevelLoadGate.HostWaitingMessage, style);
+        }
+
+        private void DrawConnectionQualityHud()
+        {
+            if (!RemoteInputLab.IsConnected || RemoteInputLab.SessionOverlayVisible)
+                return;
+
+            var ping = RemoteInputLab.PingMilliseconds;
+            var loss = RemoteInputLab.EstimatedPacketLossPercent;
+            var text = "PING " + (ping < 0 ? "--" : ping.ToString()) + " ms   " +
+                "PÉRDIDA " + (loss < 0 ? "--" : loss.ToString()) + "%";
+            var style = new GUIStyle(GUI.skin.box)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 13,
+            };
+            if ((ping >= 0 && ping > 160) || loss > 8)
+                style.normal.textColor = new Color(1f, 0.45f, 0.35f);
+            else if ((ping >= 0 && ping > 90) || loss > 3)
+                style.normal.textColor = new Color(1f, 0.82f, 0.35f);
+            else
+                style.normal.textColor = new Color(0.75f, 1f, 0.75f);
+            GUI.Box(new Rect(Screen.width - 255, 14, 240, 30), text, style);
+        }
+
+        private void DrawSessionInterruptionOverlay()
+        {
+            if (!RemoteInputLab.SessionOverlayVisible)
+                return;
+
+            var previousColor = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.82f);
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height),
+                Texture2D.whiteTexture);
+            GUI.color = Color.white;
+
+            var width = Mathf.Min(620f, Screen.width - 40f);
+            var height = RemoteInputLab.CanLeaveInterruptedSession ? 250f : 200f;
+            GUILayout.BeginArea(new Rect((Screen.width - width) * 0.5f,
+                (Screen.height - height) * 0.5f, width, height), GUI.skin.box);
+
+            var titleStyle = new GUIStyle(GUI.skin.label)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 26,
+                fontStyle = FontStyle.Bold,
+                wordWrap = true,
+            };
+            titleStyle.normal.textColor = Color.white;
+            var bodyStyle = new GUIStyle(GUI.skin.label)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 17,
+                wordWrap = true,
+            };
+            bodyStyle.normal.textColor = Color.white;
+
+            GUILayout.Space(14);
+            GUILayout.Label(RemoteInputLab.SessionIsResuming ?
+                "REANUDANDO" : "PARTIDA EN PAUSA", titleStyle);
+            GUILayout.Space(12);
+            if (RemoteInputLab.SessionIsResuming)
+                GUILayout.Label(RemoteInputLab.SessionResumeSeconds.ToString(), titleStyle);
+            else
+                GUILayout.Label(RemoteInputLab.SessionHoldReason +
+                    " La partida continuará cuando regrese.", bodyStyle);
+
+            if (RemoteInputLab.CanLeaveInterruptedSession)
+            {
+                GUILayout.FlexibleSpace();
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(35);
+                if (GUILayout.Button("SEGUIR ESPERANDO", GUILayout.Height(38)))
+                {
+                    // Esperar es el comportamiento predeterminado; el botón sirve
+                    // para dejar explícita la elección sin alterar la sesión.
+                }
+                GUILayout.Space(12);
+                if (GUILayout.Button("SALIR DE LA PARTIDA", GUILayout.Height(38)))
+                    StopOnline();
+                GUILayout.Space(35);
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.Space(14);
+            GUILayout.EndArea();
+            GUI.color = previousColor;
         }
 
         private void DrawOnlineWindow(int id)
