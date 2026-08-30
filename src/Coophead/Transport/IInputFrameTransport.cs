@@ -11,11 +11,13 @@ namespace Coophead.Transport
         void Update();
         void Send(InputFrame frame);
         bool TryReceive(uint receiverTick, out InputFrame frame);
-        void SendScene(SceneCommand command);
+        uint SendScene(SceneCommand command);
         bool TryReceiveScene(out SceneCommand command);
         void SendContext(SessionContext context);
         bool TryReceiveContext(out SessionContext context);
         void SendPlayerState(PlayerStateSnapshot state);
         bool TryReceivePlayerState(out PlayerStateSnapshot state);
+        void SendBossState(BossStateSnapshot state);
+        bool TryReceiveBossState(out BossStateSnapshot state);
     }
 }

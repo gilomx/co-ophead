@@ -7,6 +7,10 @@ using Coophead.Transport;
 
 namespace Coophead
 {
+    // Los bordes de botones deben promoverse antes de que los motores y armas de
+    // Cuphead ejecuten su FixedUpdate; de lo contrario un pulso de un solo frame
+    // puede cargarse y borrarse sin que el consumidor llegue a verlo.
+    [DefaultExecutionOrder(-10000)]
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     [BepInProcess("Cuphead.exe")]
     public sealed class Plugin : BaseUnityPlugin
@@ -33,6 +37,9 @@ namespace Coophead
         private string joinCode = "";
         private string onlineMessage = "";
         private Rect onlineWindow = new Rect(30, 30, 390, 300);
+        private bool focusLossRecorded;
+        private int focusLostFrame;
+        private float focusLostRealtime;
 
         private void Awake()
         {
@@ -94,6 +101,16 @@ namespace Coophead
             RemoteInputLab.Tick();
         }
 
+        private void FixedUpdate()
+        {
+            RemoteInputLab.AdvanceFixedInput();
+        }
+
+        private void LateUpdate()
+        {
+            RemoteInputLab.LateTick();
+        }
+
         private void OnGUI()
         {
             if (showOnlineMenu)
@@ -105,7 +122,8 @@ namespace Coophead
 
         private void DrawLevelLoadMessage()
         {
-            if (!LevelLoadGate.ShowHostWaitingMessage)
+            var showWaitingMessage = LevelLoadGate.ShowHostWaitingMessage;
+            if (!showWaitingMessage && !LevelLoadGate.CanAbort)
                 return;
 
             var style = new GUIStyle(GUI.skin.label)
@@ -116,7 +134,19 @@ namespace Coophead
             };
             style.normal.textColor = Color.white;
             GUI.Label(new Rect(20, Screen.height * 0.68f,
-                Screen.width - 40, 50), LevelLoadGate.HostWaitingMessage, style);
+                Screen.width - 40, 50), showWaitingMessage ?
+                    LevelLoadGate.HostWaitingMessage :
+                    "LA CARGA NO TERMINÓ CORRECTAMENTE", style);
+
+            if (LevelLoadGate.CanAbort)
+            {
+                var buttonWidth = 310f;
+                var buttonText = LevelLoadGate.TargetIsLevel ?
+                    "CANCELAR Y VOLVER AL MAPA" : "CANCELAR Y SALIR DE LA SESIÓN";
+                if (GUI.Button(new Rect((Screen.width - buttonWidth) * 0.5f,
+                    Screen.height * 0.76f, buttonWidth, 42f), buttonText))
+                    RemoteInputLab.AbortCoordinatedLoad();
+            }
         }
 
         private void DrawConnectionQualityHud()
@@ -327,6 +357,38 @@ namespace Coophead
         {
             Logger.LogInfo("Escena cargada: " + scene.name + " (" + mode + ")");
             RemoteInputLab.OnSceneLoaded(scene.name, mode);
+        }
+
+        private void OnApplicationFocus(bool hasFocus)
+        {
+            if (!hasFocus)
+            {
+                focusLossRecorded = true;
+                focusLostFrame = Time.frameCount;
+                focusLostRealtime = Time.realtimeSinceStartup;
+                Logger.LogInfo("[Focus] Cuphead perdió el foco. frame=" +
+                    focusLostFrame + " runInBackground=" + Application.runInBackground +
+                    " sesión=" + RemoteInputLab.Enabled + ".");
+                return;
+            }
+
+            var details = string.Empty;
+            if (focusLossRecorded)
+            {
+                details = " framesEnSegundoPlano=" + (Time.frameCount - focusLostFrame) +
+                    " segundos=" + (Time.realtimeSinceStartup - focusLostRealtime).ToString("0.00");
+                focusLossRecorded = false;
+            }
+            Logger.LogInfo("[Focus] Cuphead recuperó el foco. frame=" + Time.frameCount +
+                details + " runInBackground=" + Application.runInBackground +
+                " sesión=" + RemoteInputLab.Enabled + ".");
+        }
+
+        private void OnApplicationPause(bool paused)
+        {
+            Logger.LogInfo("[Focus] OnApplicationPause=" + paused +
+                " frame=" + Time.frameCount +
+                " runInBackground=" + Application.runInBackground + ".");
         }
 
         private void OnDestroy()

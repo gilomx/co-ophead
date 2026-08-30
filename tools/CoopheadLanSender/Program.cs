@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using Coophead;
 using Coophead.Transport;
 
-const uint VersionToken = 0x001100;
+const uint VersionToken = 0x00120B;
 var host = args.Length > 0 ? args[0] : "127.0.0.1";
 var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 27182;
 

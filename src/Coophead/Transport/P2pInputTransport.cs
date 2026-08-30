@@ -162,12 +162,14 @@ namespace Coophead.Transport
         public void Reset() { if (udp != null) udp.Reset(); }
         public void Send(InputFrame frame) { if (udp != null) udp.Send(frame); }
         public bool TryReceive(uint tick, out InputFrame frame) { if (udp != null) return udp.TryReceive(tick, out frame); frame = default(InputFrame); return false; }
-        public void SendScene(SceneCommand value) { if (udp != null) udp.SendScene(value); }
+        public uint SendScene(SceneCommand value) { return udp == null ? 0 : udp.SendScene(value); }
         public bool TryReceiveScene(out SceneCommand value) { if (udp != null) return udp.TryReceiveScene(out value); value = default(SceneCommand); return false; }
         public void SendContext(SessionContext value) { if (udp != null) udp.SendContext(value); }
         public bool TryReceiveContext(out SessionContext value) { if (udp != null) return udp.TryReceiveContext(out value); value = default(SessionContext); return false; }
         public void SendPlayerState(PlayerStateSnapshot value) { if (udp != null) udp.SendPlayerState(value); }
         public bool TryReceivePlayerState(out PlayerStateSnapshot value) { if (udp != null) return udp.TryReceivePlayerState(out value); value = default(PlayerStateSnapshot); return false; }
+        public void SendBossState(BossStateSnapshot value) { if (udp != null) udp.SendBossState(value); }
+        public bool TryReceiveBossState(out BossStateSnapshot value) { if (udp != null) return udp.TryReceiveBossState(out value); value = default(BossStateSnapshot); return false; }
         public void Dispose()
         {
             if (signalingRequest != null) { signalingRequest.Abort(); signalingRequest.Dispose(); signalingRequest = null; }

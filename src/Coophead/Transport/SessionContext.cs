@@ -9,6 +9,7 @@ namespace Coophead.Transport
         public byte ResumeSeconds;
         public int CurrentMap;
         public int CurrentLevel;
+        public uint LoadTransitionId;
 
         public bool HasSave => (Flags & 1) != 0;
         public bool PlayerOneIsMugman => (Flags & 2) != 0;

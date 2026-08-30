@@ -18,6 +18,7 @@ namespace Coophead.Transport
         private readonly Queue<SceneCommand> receivedScenes = new Queue<SceneCommand>();
         private readonly Queue<SessionContext> receivedContexts = new Queue<SessionContext>();
         private readonly Queue<PlayerStateSnapshot> receivedPlayerStates = new Queue<PlayerStateSnapshot>();
+        private readonly Queue<BossStateSnapshot> receivedBossStates = new Queue<BossStateSnapshot>();
         private readonly byte[] receiveBuffer = new byte[128];
         private EndPoint peer;
         private InputButtons lastReceivedHeld;
@@ -36,6 +37,7 @@ namespace Coophead.Transport
         private uint nextContextSequence = 1;
         private uint lastReceivedContextSequence;
         private uint lastReceivedPlayerStateTick;
+        private uint lastReceivedBossStateTick;
         private long receivedRealtimePackets;
         private long estimatedMissingRealtimePackets;
 
@@ -108,12 +110,14 @@ namespace Coophead.Transport
             receivedScenes.Clear();
             receivedContexts.Clear();
             receivedPlayerStates.Clear();
+            receivedBossStates.Clear();
             lastReceivedHeld = InputButtons.None;
             lastReceivedTick = 0;
             PingMilliseconds = -1;
             lastReceivedSceneSequence = 0;
             lastReceivedContextSequence = 0;
             lastReceivedPlayerStateTick = 0;
+            lastReceivedBossStateTick = 0;
             receivedRealtimePackets = 0;
             estimatedMissingRealtimePackets = 0;
             DrainSocket();
@@ -175,16 +179,18 @@ namespace Coophead.Transport
             return true;
         }
 
-        public void SendScene(SceneCommand command)
+        public uint SendScene(SceneCommand command)
         {
             if (!host)
-                return;
-            command.Sequence = nextSceneSequence++;
+                return 0;
+            if (command.Sequence == 0)
+                command.Sequence = nextSceneSequence++;
             if (nextSceneSequence == 0)
                 nextSceneSequence = 1;
             pendingScene = command;
             hasPendingScene = true;
             lastSceneSentUtc = DateTime.MinValue;
+            return command.Sequence;
         }
 
         public bool TryReceiveScene(out SceneCommand command)
@@ -235,6 +241,23 @@ namespace Coophead.Transport
                 return false;
             }
             state = receivedPlayerStates.Dequeue();
+            return true;
+        }
+
+        public void SendBossState(BossStateSnapshot state)
+        {
+            if (host && IsConnected)
+                SendPacket(LanBossStatePacketCodec.Encode(state), peer);
+        }
+
+        public bool TryReceiveBossState(out BossStateSnapshot state)
+        {
+            if (host || receivedBossStates.Count == 0)
+            {
+                state = default(BossStateSnapshot);
+                return false;
+            }
+            state = receivedBossStates.Dequeue();
             return true;
         }
 
@@ -310,10 +333,32 @@ namespace Coophead.Transport
                 if (!host && IsConnected && SameEndpoint(sender, peer))
                 {
                     lastPacketReceivedUtc = now;
+                    if (lastReceivedPlayerStateTick != 0 &&
+                        unchecked((int)(playerState.Tick - lastReceivedPlayerStateTick)) <= 0)
+                        return;
                     RecordPlayerStatePacket(playerState.Tick);
                     while (receivedPlayerStates.Count > 0)
-                        receivedPlayerStates.Dequeue();
+                    {
+                        var skipped = receivedPlayerStates.Dequeue();
+                        LanPlayerStatePacketCodec.MergeTransientEvents(
+                            ref playerState, skipped);
+                    }
                     receivedPlayerStates.Enqueue(playerState);
+                }
+                return;
+            }
+            BossStateSnapshot bossState;
+            if (LanBossStatePacketCodec.TryDecode(packet, out bossState))
+            {
+                if (!host && IsConnected && SameEndpoint(sender, peer))
+                {
+                    lastPacketReceivedUtc = now;
+                    if (lastReceivedBossStateTick != 0 &&
+                        unchecked((int)(bossState.Tick - lastReceivedBossStateTick)) <= 0)
+                        return;
+                    lastReceivedBossStateTick = bossState.Tick;
+                    receivedBossStates.Clear();
+                    receivedBossStates.Enqueue(bossState);
                 }
                 return;
             }
@@ -324,8 +369,8 @@ namespace Coophead.Transport
                 return;
             if (frame.Tick <= lastReceivedTick && lastReceivedTick != 0)
                 return;
-            frame.Pressed = frame.Held & ~lastReceivedHeld;
-            frame.Released = lastReceivedHeld & ~frame.Held;
+            frame.Pressed |= frame.Held & ~lastReceivedHeld;
+            frame.Released |= lastReceivedHeld & ~frame.Held;
             RecordInputPacket(frame.Tick);
             lastReceivedHeld = frame.Held;
             lastReceivedTick = frame.Tick;
@@ -407,8 +452,10 @@ namespace Coophead.Transport
             receivedScenes.Clear();
             receivedContexts.Clear();
             receivedPlayerStates.Clear();
+            receivedBossStates.Clear();
             PingMilliseconds = -1;
             lastReceivedPlayerStateTick = 0;
+            lastReceivedBossStateTick = 0;
             receivedRealtimePackets = 0;
             estimatedMissingRealtimePackets = 0;
             Status = status;
@@ -430,8 +477,8 @@ namespace Coophead.Transport
             if (lastReceivedPlayerStateTick != 0)
             {
                 var gap = unchecked((int)(tick - lastReceivedPlayerStateTick));
-                if (gap > 3 && gap <= 30)
-                    estimatedMissingRealtimePackets += Math.Max(0, gap / 3 - 1);
+                if (gap > 1 && gap <= 30)
+                    estimatedMissingRealtimePackets += gap - 1;
             }
             lastReceivedPlayerStateTick = tick;
             receivedRealtimePackets++;

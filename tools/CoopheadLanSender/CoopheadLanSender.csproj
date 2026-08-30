@@ -18,6 +18,8 @@
     <Compile Include="..\..\src\Coophead\Transport\SessionContext.cs" Link="SessionContext.cs" />
     <Compile Include="..\..\src\Coophead\Transport\PlayerStateSnapshot.cs" Link="PlayerStateSnapshot.cs" />
     <Compile Include="..\..\src\Coophead\Transport\LanPlayerStatePacketCodec.cs" Link="LanPlayerStatePacketCodec.cs" />
+    <Compile Include="..\..\src\Coophead\Transport\BossStateSnapshot.cs" Link="BossStateSnapshot.cs" />
+    <Compile Include="..\..\src\Coophead\Transport\LanBossStatePacketCodec.cs" Link="LanBossStatePacketCodec.cs" />
     <Compile Include="..\..\src\Coophead\Transport\UdpInputTransport.cs" Link="UdpInputTransport.cs" />
   </ItemGroup>
 </Project>

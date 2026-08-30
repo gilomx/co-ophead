@@ -47,6 +47,13 @@ sincronización de combate.
 Consulta [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para las decisiones y fases.
 La superficie de integración confirmada está en [docs/GAME_API.md](docs/GAME_API.md).
 
+## Pruebas pendientes
+
+La corrección de EX/Super del host y la reconciliación de Player Two al recibir
+un golpe de Goopy están pendientes de validación manual en dos equipos. El
+procedimiento y los resultados esperados están en
+[docs/PENDING_TESTS.md](docs/PENDING_TESTS.md).
+
 ## Estado
 
 La prueba actual es `0.12.6`: añade

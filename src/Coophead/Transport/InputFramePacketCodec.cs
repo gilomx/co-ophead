@@ -4,9 +4,9 @@ namespace Coophead.Transport
 {
     internal static class InputFramePacketCodec
     {
-        public const byte ProtocolVersion = 4;
+        public const byte ProtocolVersion = 9;
         public const byte InputPacketType = 1;
-        public const int PacketSize = 25;
+        public const int PacketSize = 29;
 
         public static byte[] Encode(InputFrame frame)
         {
@@ -24,6 +24,7 @@ namespace Coophead.Transport
             WriteUInt32(packet, 16, (uint)frame.Pressed);
             WriteUInt32(packet, 20, (uint)frame.Released);
             packet[24] = (byte)frame.Flags;
+            WriteUInt32(packet, 25, frame.ReadyTransitionId);
             return packet;
         }
 
@@ -44,6 +45,7 @@ namespace Coophead.Transport
             frame.Pressed = (InputButtons)ReadUInt32(packet, 16);
             frame.Released = (InputButtons)ReadUInt32(packet, 20);
             frame.Flags = (InputFrameFlags)packet[24];
+            frame.ReadyTransitionId = ReadUInt32(packet, 25);
             return true;
         }
 

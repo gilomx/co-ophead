@@ -6,7 +6,7 @@ namespace Coophead.Transport
     internal static class LanScenePacketCodec
     {
         public const byte ScenePacketType = 7;
-        public const int HeaderSize = 12;
+        public const int HeaderSize = 18;
         public const int MaxSceneNameBytes = 96;
 
         public static byte[] Encode(SceneCommand command)
@@ -25,6 +25,9 @@ namespace Coophead.Transport
             WriteUInt32(packet, 6, command.Sequence);
             packet[10] = command.LoadMode;
             packet[11] = (byte)nameBytes.Length;
+            WriteUInt32(packet, 12, unchecked((uint)command.LevelId));
+            packet[16] = command.Difficulty;
+            packet[17] = (byte)command.Flags;
             Buffer.BlockCopy(nameBytes, 0, packet, HeaderSize, nameBytes.Length);
             return packet;
         }
@@ -45,6 +48,9 @@ namespace Coophead.Transport
 
             command.Sequence = ReadUInt32(packet, 6);
             command.LoadMode = packet[10];
+            command.LevelId = unchecked((int)ReadUInt32(packet, 12));
+            command.Difficulty = packet[16];
+            command.Flags = (SceneCommandFlags)packet[17];
             command.SceneName = Encoding.UTF8.GetString(packet, HeaderSize, nameLength);
             return command.Sequence != 0;
         }

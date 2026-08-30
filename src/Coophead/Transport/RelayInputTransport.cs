@@ -17,11 +17,17 @@ namespace Coophead.Transport
         private readonly Queue<SceneCommand> scenes = new Queue<SceneCommand>();
         private readonly Queue<SessionContext> contexts = new Queue<SessionContext>();
         private readonly Queue<PlayerStateSnapshot> playerStates = new Queue<PlayerStateSnapshot>();
+        private readonly Queue<BossStateSnapshot> bossStates = new Queue<BossStateSnapshot>();
         private readonly byte[] receiveBuffer = new byte[4096];
         private byte[] sending;
+        private PlayerStateSnapshot pendingPlayerState;
+        private bool hasPendingPlayerState;
+        private byte[] pendingBossStateFrame;
+        private bool preferBossState;
         private int sendOffset;
         private uint nextSceneSequence = 1, nextContextSequence = 1;
-        private uint lastInputTick, lastSceneSequence, lastContextSequence, lastStateTick;
+        private uint lastInputTick, lastSceneSequence, lastContextSequence, lastStateTick,
+            lastBossStateTick;
         private InputButtons lastHeld;
         private bool handshakeQueued;
 
@@ -70,9 +76,14 @@ namespace Coophead.Transport
 
         public void Reset()
         {
-            frames.Clear(); scenes.Clear(); contexts.Clear(); playerStates.Clear();
-            lastInputTick = lastSceneSequence = lastContextSequence = lastStateTick = 0;
+            frames.Clear(); scenes.Clear(); contexts.Clear(); playerStates.Clear(); bossStates.Clear();
+            lastInputTick = lastSceneSequence = lastContextSequence = lastStateTick =
+                lastBossStateTick = 0;
             lastHeld = InputButtons.None;
+            pendingPlayerState = default(PlayerStateSnapshot);
+            hasPendingPlayerState = false;
+            pendingBossStateFrame = null;
+            preferBossState = false;
         }
 
         public void Send(InputFrame frame) { if (!host && IsConnected) QueueData(InputFramePacketCodec.Encode(frame)); }
@@ -81,10 +92,12 @@ namespace Coophead.Transport
             if (!host || frames.Count == 0) { frame = default(InputFrame); return false; }
             frame = frames.Dequeue(); return true;
         }
-        public void SendScene(SceneCommand command)
+        public uint SendScene(SceneCommand command)
         {
-            if (!host || !IsConnected) return;
-            command.Sequence = nextSceneSequence++; QueueData(LanScenePacketCodec.Encode(command));
+            if (!host || !IsConnected) return 0;
+            if (command.Sequence == 0) command.Sequence = nextSceneSequence++;
+            QueueData(LanScenePacketCodec.Encode(command));
+            return command.Sequence;
         }
         public bool TryReceiveScene(out SceneCommand command)
         {
@@ -103,12 +116,32 @@ namespace Coophead.Transport
         }
         public void SendPlayerState(PlayerStateSnapshot state)
         {
-            if (host && IsConnected) QueueData(LanPlayerStatePacketCodec.Encode(state));
+            if (host && IsConnected)
+            {
+                if (hasPendingPlayerState)
+                {
+                    LanPlayerStatePacketCodec.MergeTransientEvents(
+                        ref state, pendingPlayerState);
+                }
+                pendingPlayerState = state;
+                hasPendingPlayerState = true;
+            }
         }
         public bool TryReceivePlayerState(out PlayerStateSnapshot state)
         {
             if (host || playerStates.Count == 0) { state = default(PlayerStateSnapshot); return false; }
             state = playerStates.Dequeue(); return true;
+        }
+        public void SendBossState(BossStateSnapshot state)
+        {
+            if (host && IsConnected)
+                pendingBossStateFrame = CreateFrame(Data,
+                    LanBossStatePacketCodec.Encode(state));
+        }
+        public bool TryReceiveBossState(out BossStateSnapshot state)
+        {
+            if (host || bossStates.Count == 0) { state = default(BossStateSnapshot); return false; }
+            state = bossStates.Dequeue(); return true;
         }
 
         private void HandleRelayFrame(byte type, byte[] payload)
@@ -125,7 +158,7 @@ namespace Coophead.Transport
             if (InputFramePacketCodec.TryDecode(packet, out input) && host)
             {
                 if (input.Tick <= lastInputTick && lastInputTick != 0) return;
-                input.Pressed = input.Held & ~lastHeld; input.Released = lastHeld & ~input.Held;
+                input.Pressed |= input.Held & ~lastHeld; input.Released |= lastHeld & ~input.Held;
                 lastHeld = input.Held; lastInputTick = input.Tick; frames.Enqueue(input); return;
             }
             SceneCommand scene;
@@ -136,16 +169,39 @@ namespace Coophead.Transport
             { lastContextSequence = context.Sequence; contexts.Enqueue(context); return; }
             PlayerStateSnapshot state;
             if (LanPlayerStatePacketCodec.TryDecode(packet, out state) && !host && state.Tick > lastStateTick)
-            { lastStateTick = state.Tick; playerStates.Clear(); playerStates.Enqueue(state); }
+            {
+                lastStateTick = state.Tick;
+                while (playerStates.Count > 0)
+                {
+                    var skipped = playerStates.Dequeue();
+                    LanPlayerStatePacketCodec.MergeTransientEvents(
+                        ref state, skipped);
+                }
+                playerStates.Enqueue(state);
+                return;
+            }
+            BossStateSnapshot bossState;
+            if (LanBossStatePacketCodec.TryDecode(packet, out bossState) && !host &&
+                (lastBossStateTick == 0 ||
+                    unchecked((int)(bossState.Tick - lastBossStateTick)) > 0))
+            {
+                lastBossStateTick = bossState.Tick;
+                bossStates.Clear();
+                bossStates.Enqueue(bossState);
+            }
         }
 
         private void QueueData(byte[] payload) { QueueFrame(Data, payload); }
         private void QueueFrame(byte type, byte[] payload)
         {
+            outgoing.Enqueue(CreateFrame(type, payload));
+        }
+        private static byte[] CreateFrame(byte type, byte[] payload)
+        {
             var frame = new byte[payload.Length + 5];
             Buffer.BlockCopy(BitConverter.GetBytes(payload.Length + 1), 0, frame, 0, 4);
             frame[4] = type; Buffer.BlockCopy(payload, 0, frame, 5, payload.Length);
-            outgoing.Enqueue(frame);
+            return frame;
         }
         private void Flush()
         {
@@ -153,13 +209,59 @@ namespace Coophead.Transport
             {
                 while (true)
                 {
-                    if (sending == null) { if (outgoing.Count == 0) return; sending = outgoing.Dequeue(); sendOffset = 0; }
+                    if (sending == null)
+                    {
+                        if (outgoing.Count > 0)
+                            sending = outgoing.Dequeue();
+                        else
+                            sending = TakePendingStateFrame();
+                        if (sending == null)
+                            return;
+                        sendOffset = 0;
+                    }
                     sendOffset += socket.Send(sending, sendOffset, sending.Length - sendOffset, SocketFlags.None);
                     if (sendOffset < sending.Length) return;
                     sending = null;
                 }
             }
             catch (SocketException ex) { if (ex.SocketErrorCode != SocketError.WouldBlock) Status = "relay desconectado"; }
+        }
+        private byte[] TakePendingStateFrame()
+        {
+            byte[] frame;
+            if (hasPendingPlayerState && pendingBossStateFrame != null)
+            {
+                if (preferBossState)
+                {
+                    frame = pendingBossStateFrame;
+                    pendingBossStateFrame = null;
+                }
+                else
+                {
+                    frame = TakePendingPlayerStateFrame();
+                }
+                preferBossState = !preferBossState;
+                return frame;
+            }
+            if (hasPendingPlayerState)
+            {
+                frame = TakePendingPlayerStateFrame();
+                preferBossState = true;
+                return frame;
+            }
+            frame = pendingBossStateFrame;
+            pendingBossStateFrame = null;
+            preferBossState = false;
+            return frame;
+        }
+
+        private byte[] TakePendingPlayerStateFrame()
+        {
+            var frame = CreateFrame(Data,
+                LanPlayerStatePacketCodec.Encode(pendingPlayerState));
+            pendingPlayerState = default(PlayerStateSnapshot);
+            hasPendingPlayerState = false;
+            return frame;
         }
         private void Receive()
         {

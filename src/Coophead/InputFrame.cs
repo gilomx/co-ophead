@@ -8,6 +8,7 @@ namespace Coophead
         None = 0,
         WaitingForHost = 1 << 0,
         LevelReady = 1 << 1,
+        Loading = 1 << 2,
     }
 
     [Flags]
@@ -25,6 +26,10 @@ namespace Coophead
         Cancel = 1u << 8,
         EquipMenu = 1u << 9,
         Swap = 1u << 10,
+        MenuUp = 1u << 11,
+        MenuLeft = 1u << 12,
+        MenuDown = 1u << 13,
+        MenuRight = 1u << 14,
     }
 
     internal struct InputFrame
@@ -33,15 +38,16 @@ namespace Coophead
         public sbyte Horizontal;
         public sbyte Vertical;
         public InputFrameFlags Flags;
+        public uint ReadyTransitionId;
         public InputButtons Held;
         public InputButtons Pressed;
         public InputButtons Released;
 
         public float GetAxis(int actionId)
         {
-            if (actionId == 0)
+            if (actionId == 0 || actionId == 22)
                 return Horizontal / 127f;
-            if (actionId == 1)
+            if (actionId == 1 || actionId == 23)
                 return Vertical / 127f;
             return 0f;
         }

@@ -5,7 +5,9 @@ namespace Coophead.Transport
     internal static class LanPlayerStatePacketCodec
     {
         public const byte PacketType = 11;
-        public const int PacketSize = 32;
+        public const int PacketSize = 64;
+        private const InputButtons AllInputButtons =
+            (InputButtons)((1u << 15) - 1u);
 
         public static byte[] Encode(PlayerStateSnapshot state)
         {
@@ -24,6 +26,17 @@ namespace Coophead.Transport
             packet[29] = state.PlayerTwoHealth;
             packet[30] = unchecked((byte)state.PlayerOneMapHorizontal);
             packet[31] = unchecked((byte)state.PlayerOneMapVertical);
+            WriteUInt32(packet, 32, state.TransitionId);
+            packet[36] = (byte)state.Flags;
+            WriteUInt32(packet, 37, (uint)state.PlayerOneHeld);
+            WriteUInt32(packet, 41, (uint)state.PlayerOnePressed);
+            WriteUInt32(packet, 45, (uint)state.PlayerOneReleased);
+            WriteFloat(packet, 49, state.PlayerOneSuperMeter);
+            WriteFloat(packet, 53, state.PlayerTwoSuperMeter);
+            packet[57] = (byte)state.PlayerOneMotionFlags;
+            packet[58] = (byte)state.PlayerTwoMotionFlags;
+            packet[59] = unchecked((byte)state.PlayerTwoHitDirection);
+            WriteUInt32(packet, 60, state.PlayerOneSuperActionSequence);
             return packet;
         }
 
@@ -45,7 +58,60 @@ namespace Coophead.Transport
             state.PlayerTwoHealth = packet[29];
             state.PlayerOneMapHorizontal = unchecked((sbyte)packet[30]);
             state.PlayerOneMapVertical = unchecked((sbyte)packet[31]);
-            return state.Tick != 0 && (state.PresentMask & ~3) == 0 && (state.DeadMask & ~3) == 0;
+            state.TransitionId = ReadUInt32(packet, 32);
+            state.Flags = (PlayerStateFlags)packet[36];
+            state.PlayerOneHeld = (InputButtons)ReadUInt32(packet, 37);
+            state.PlayerOnePressed = (InputButtons)ReadUInt32(packet, 41);
+            state.PlayerOneReleased = (InputButtons)ReadUInt32(packet, 45);
+            state.PlayerOneSuperMeter = ReadFloat(packet, 49);
+            state.PlayerTwoSuperMeter = ReadFloat(packet, 53);
+            state.PlayerOneMotionFlags = (PlayerMotionFlags)packet[57];
+            state.PlayerTwoMotionFlags = (PlayerMotionFlags)packet[58];
+            state.PlayerTwoHitDirection = unchecked((sbyte)packet[59]);
+            state.PlayerOneSuperActionSequence = ReadUInt32(packet, 60);
+            return state.Tick != 0 && (state.PresentMask & ~3) == 0 &&
+                (state.DeadMask & ~3) == 0 &&
+                (state.Flags & ~PlayerStateFlags.GameplayStarted) == 0 &&
+                (state.PlayerOneMotionFlags & ~(PlayerMotionFlags.Dashing |
+                    PlayerMotionFlags.Hit |
+                    PlayerMotionFlags.UsingSuperOrEx)) == 0 &&
+                (state.PlayerTwoMotionFlags & ~(PlayerMotionFlags.Dashing |
+                    PlayerMotionFlags.Hit |
+                    PlayerMotionFlags.UsingSuperOrEx)) == 0 &&
+                state.PlayerTwoHitDirection >= -1 &&
+                state.PlayerTwoHitDirection <= 1 &&
+                (state.PlayerOneHeld & ~AllInputButtons) == 0 &&
+                (state.PlayerOnePressed & ~AllInputButtons) == 0 &&
+                (state.PlayerOneReleased & ~AllInputButtons) == 0 &&
+                IsFinite(state.PlayerOneX) &&
+                IsFinite(state.PlayerOneY) &&
+                IsFinite(state.PlayerTwoX) &&
+                IsFinite(state.PlayerTwoY) &&
+                IsFinite(state.PlayerOneSuperMeter) &&
+                IsFinite(state.PlayerTwoSuperMeter) &&
+                state.PlayerOneSuperMeter >= 0f &&
+                state.PlayerTwoSuperMeter >= 0f &&
+                state.PlayerOneSuperMeter <= 100f &&
+                state.PlayerTwoSuperMeter <= 100f;
+        }
+
+        public static void MergeTransientEvents(ref PlayerStateSnapshot state,
+            PlayerStateSnapshot skipped)
+        {
+            state.PlayerOnePressed |= skipped.PlayerOnePressed;
+            state.PlayerOneReleased |= skipped.PlayerOneReleased;
+            if ((skipped.PlayerTwoMotionFlags & PlayerMotionFlags.Hit) == 0)
+                return;
+            var stateWasHit = (state.PlayerTwoMotionFlags &
+                PlayerMotionFlags.Hit) != 0;
+            state.PlayerTwoMotionFlags |= PlayerMotionFlags.Hit;
+            if (!stateWasHit || state.PlayerTwoHitDirection == 0)
+                state.PlayerTwoHitDirection = skipped.PlayerTwoHitDirection;
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
         private static void WriteFloat(byte[] buffer, int offset, float value)

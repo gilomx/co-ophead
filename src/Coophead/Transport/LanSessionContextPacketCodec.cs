@@ -3,7 +3,7 @@ namespace Coophead.Transport
     internal static class LanSessionContextPacketCodec
     {
         public const byte ContextPacketType = 9;
-        public const int PacketSize = 22;
+        public const int PacketSize = 26;
 
         public static byte[] Encode(SessionContext context)
         {
@@ -19,6 +19,7 @@ namespace Coophead.Transport
             packet[13] = context.ResumeSeconds;
             WriteUInt32(packet, 14, unchecked((uint)context.CurrentMap));
             WriteUInt32(packet, 18, unchecked((uint)context.CurrentLevel));
+            WriteUInt32(packet, 22, context.LoadTransitionId);
             return packet;
         }
 
@@ -38,6 +39,7 @@ namespace Coophead.Transport
             context.ResumeSeconds = packet[13];
             context.CurrentMap = unchecked((int)ReadUInt32(packet, 14));
             context.CurrentLevel = unchecked((int)ReadUInt32(packet, 18));
+            context.LoadTransitionId = ReadUInt32(packet, 22);
             return context.Sequence != 0 && context.Difficulty <= 2;
         }
 

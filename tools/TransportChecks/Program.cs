@@ -7,10 +7,12 @@ var sent = new InputFrame
     Tick = 10,
     Horizontal = 127,
     Vertical = -127,
-    Held = InputButtons.Jump,
-    Pressed = InputButtons.Jump,
-    Released = InputButtons.Dash,
-    Flags = InputFrameFlags.WaitingForHost | InputFrameFlags.LevelReady,
+    Held = InputButtons.Jump | InputButtons.MenuLeft | InputButtons.Lock,
+    Pressed = InputButtons.Jump | InputButtons.Super,
+    Released = InputButtons.Dash | InputButtons.Lock,
+    Flags = InputFrameFlags.WaitingForHost | InputFrameFlags.LevelReady |
+        InputFrameFlags.Loading,
+    ReadyTransitionId = 77,
 };
 
 transport.Send(sent);
@@ -23,12 +25,23 @@ Assert(received.Tick == 10, "El transporte alteró el tick de origen.");
 Assert(received.Horizontal == 127, "El transporte alteró el eje horizontal.");
 Assert(received.Vertical == -127, "El transporte alteró el eje vertical.");
 Assert(received.HasHeld(InputButtons.Jump), "El transporte perdió botones mantenidos.");
-Assert(received.HasPressed(InputButtons.Jump), "El transporte perdió el borde de pulsación.");
-Assert(received.HasReleased(InputButtons.Dash), "El transporte perdió el borde de liberación.");
+    Assert(received.HasHeld(InputButtons.MenuLeft),
+        "El transporte perdió las direcciones del menú.");
+    Assert(received.HasHeld(InputButtons.Lock),
+        "El transporte perdió el botón mantenido de fijar.");
+    Assert(received.HasPressed(InputButtons.Jump), "El transporte perdió el borde de pulsación.");
+    Assert(received.HasPressed(InputButtons.Super),
+        "El transporte perdió el borde de EX/Super.");
+    Assert(received.HasReleased(InputButtons.Dash), "El transporte perdió el borde de liberación.");
+    Assert(received.HasReleased(InputButtons.Lock),
+        "El transporte perdió la liberación de fijar.");
 Assert((received.Flags & InputFrameFlags.WaitingForHost) != 0,
     "El transporte perdió el estado de espera del invitado.");
 Assert((received.Flags & InputFrameFlags.LevelReady) != 0,
     "El transporte perdió la confirmación de nivel listo.");
+Assert((received.Flags & InputFrameFlags.Loading) != 0 &&
+    received.ReadyTransitionId == 77,
+    "El transporte perdió el estado o identificador de carga.");
 Assert(!transport.TryReceive(13, out _), "El transporte entregó el mismo frame dos veces.");
 
 transport.Reset();
@@ -41,12 +54,67 @@ transport.Dispose();
 var encoded = InputFramePacketCodec.Encode(sent);
 Assert(encoded.Length == InputFramePacketCodec.PacketSize, "El codec produjo un tamaño inesperado.");
 Assert(InputFramePacketCodec.TryDecode(encoded, out var decoded), "El codec rechazó un paquete válido.");
-Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
-    decoded.Vertical == sent.Vertical && decoded.Held == sent.Held &&
-    decoded.Flags == sent.Flags,
+    Assert(decoded.Tick == sent.Tick && decoded.Horizontal == sent.Horizontal &&
+        decoded.Vertical == sent.Vertical && decoded.Held == sent.Held &&
+        decoded.Pressed == sent.Pressed && decoded.Released == sent.Released &&
+        decoded.Flags == sent.Flags &&
+    decoded.ReadyTransitionId == sent.ReadyTransitionId,
     "El codec alteró el InputFrame.");
 encoded[4]++;
 Assert(!InputFramePacketCodec.TryDecode(encoded, out _), "El codec aceptó otro protocolo.");
+
+var sentBossState = new BossStateSnapshot
+{
+    Tick = 901,
+    TransitionId = 77,
+    LevelId = 12,
+    Flags = BossStateFlags.Active,
+    Phase = 2,
+    ActiveActor = 1 | 4,
+    ActionState = 3,
+    CurrentHealth = 42.5f,
+    TotalHealth = 100f,
+    X = -123.25f,
+    Y = 456.75f,
+    ScaleX = -1.25f,
+    ScaleY = 1.5f,
+    AnimatorStateHash = unchecked((int)0x8BADF00D),
+    AnimatorNormalizedTime = 2.75f,
+};
+var encodedBossState = LanBossStatePacketCodec.Encode(sentBossState);
+Assert(encodedBossState.Length == LanBossStatePacketCodec.PacketSize,
+    "El codec de jefe produjo un tamaño inesperado.");
+Assert(LanBossStatePacketCodec.TryDecode(encodedBossState, out var decodedBossState),
+    "El codec de jefe rechazó un paquete válido.");
+Assert(decodedBossState.Tick == sentBossState.Tick &&
+    decodedBossState.TransitionId == sentBossState.TransitionId &&
+    decodedBossState.LevelId == sentBossState.LevelId &&
+    decodedBossState.Flags == sentBossState.Flags &&
+    decodedBossState.Phase == sentBossState.Phase &&
+    decodedBossState.ActiveActor == sentBossState.ActiveActor &&
+    decodedBossState.ActionState == sentBossState.ActionState &&
+    decodedBossState.CurrentHealth == sentBossState.CurrentHealth &&
+    decodedBossState.TotalHealth == sentBossState.TotalHealth &&
+    decodedBossState.X == sentBossState.X && decodedBossState.Y == sentBossState.Y &&
+    decodedBossState.ScaleX == sentBossState.ScaleX &&
+    decodedBossState.ScaleY == sentBossState.ScaleY &&
+    decodedBossState.AnimatorStateHash == sentBossState.AnimatorStateHash &&
+    decodedBossState.AnimatorNormalizedTime == sentBossState.AnimatorNormalizedTime,
+    "El codec alteró el snapshot del jefe.");
+Assert(!LanBossStatePacketCodec.TryDecode(encodedBossState[..^1], out _),
+    "El codec de jefe aceptó un paquete truncado.");
+var invalidBossState = LanBossStatePacketCodec.Encode(sentBossState);
+invalidBossState[18] = 0x80;
+Assert(!LanBossStatePacketCodec.TryDecode(invalidBossState, out _),
+    "El codec de jefe aceptó flags desconocidos.");
+invalidBossState = LanBossStatePacketCodec.Encode(sentBossState);
+invalidBossState[20] = 8;
+Assert(!LanBossStatePacketCodec.TryDecode(invalidBossState, out _),
+    "El codec de jefe aceptó un actor fuera del bitmask permitido.");
+invalidBossState = LanBossStatePacketCodec.Encode(sentBossState);
+Buffer.BlockCopy(BitConverter.GetBytes(float.NaN), 0, invalidBossState, 30, 4);
+Assert(!LanBossStatePacketCodec.TryDecode(invalidBossState, out _),
+    "El codec de jefe aceptó una posición no finita.");
 
 var stunTransaction = Enumerable.Range(1, 12).Select(x => (byte)x).ToArray();
 var stunRequest = StunPacketCodec.CreateBindingRequest(stunTransaction);
@@ -111,7 +179,32 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     Assert(arrived && networkFrame.HasReleased(InputButtons.Shoot),
         "UDP no reconstruyó el borde de liberación.");
 
-    host.SendScene(new SceneCommand { SceneName = "scene_map_world_1", LoadMode = 0 });
+    client.Send(new InputFrame
+    {
+        Tick = 102,
+        Held = InputButtons.None,
+        Pressed = InputButtons.Super | InputButtons.Lock,
+        Released = InputButtons.Dash | InputButtons.Lock,
+    });
+    arrived = false;
+    for (var attempt = 0; attempt < 100 && !arrived; attempt++)
+    {
+        host.Update();
+        arrived = host.TryReceive(0, out networkFrame);
+        if (!arrived)
+            Thread.Sleep(5);
+    }
+    Assert(arrived && networkFrame.HasPressed(InputButtons.Super) &&
+        networkFrame.HasPressed(InputButtons.Lock) &&
+        networkFrame.HasReleased(InputButtons.Dash) &&
+        networkFrame.HasReleased(InputButtons.Lock),
+        "UDP sobrescribió los bordes explícitos del cliente.");
+
+    var sentSceneSequence = host.SendScene(new SceneCommand
+    {
+        SceneName = "scene_map_world_1", LoadMode = 0, LevelId = -1,
+        Difficulty = 2, Flags = SceneCommandFlags.CoordinatedTransition,
+    });
     SceneCommand receivedScene = default;
     var sceneArrived = false;
     for (var attempt = 0; attempt < 200 && !sceneArrived; attempt++)
@@ -125,7 +218,9 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     }
     Assert(sceneArrived && receivedScene.SceneName == "scene_map_world_1",
         "El comando fiable de escena no llegó.");
-    Assert(receivedScene.Sequence != 0, "La escena llegó sin secuencia.");
+    Assert(receivedScene.Sequence == sentSceneSequence && receivedScene.LevelId == -1 &&
+        receivedScene.Difficulty == 2 && receivedScene.IsCoordinatedTransition,
+        "La escena llegó sin su secuencia, dificultad o tipo de transición.");
 
     for (var attempt = 0; attempt < 80; attempt++)
     {
@@ -136,6 +231,27 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     }
     Assert(!client.TryReceiveScene(out _), "El cliente entregó una escena duplicada.");
 
+    var cancelSequence = host.SendScene(new SceneCommand
+    {
+        SceneName = "scene_map_world_1", LoadMode = 0, LevelId = -1,
+        Difficulty = 2, Flags = SceneCommandFlags.CancelCoordinatedTransition,
+    });
+    SceneCommand receivedCancellation = default;
+    var cancellationArrived = false;
+    for (var attempt = 0; attempt < 200 && !cancellationArrived; attempt++)
+    {
+        host.Update();
+        client.Update();
+        host.Update();
+        cancellationArrived = client.TryReceiveScene(out receivedCancellation);
+        if (!cancellationArrived)
+            Thread.Sleep(5);
+    }
+    Assert(cancellationArrived && receivedCancellation.Sequence == cancelSequence &&
+        receivedCancellation.CancelsCoordinatedTransition &&
+        !receivedCancellation.IsCoordinatedTransition,
+        "El aviso fiable de cancelación no llegó con sus flags.");
+
     host.SendContext(new SessionContext
     {
         SaveSlot = 1,
@@ -144,6 +260,7 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         ResumeSeconds = 3,
         CurrentMap = 6,
         CurrentLevel = 42,
+        LoadTransitionId = 77,
     });
     SessionContext receivedContext = default;
     var contextArrived = false;
@@ -162,7 +279,8 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         receivedContext.SessionSuspended && receivedContext.SessionResuming &&
         receivedContext.LevelGateReleased &&
         receivedContext.ResumeSeconds == 3 &&
-        receivedContext.CurrentMap == 6 && receivedContext.CurrentLevel == 42,
+        receivedContext.CurrentMap == 6 && receivedContext.CurrentLevel == 42 &&
+        receivedContext.LoadTransitionId == 77,
         "El transporte alteró el contexto de sesión.");
     Assert(receivedContext.Sequence != 0, "El contexto llegó sin secuencia.");
 
@@ -178,6 +296,7 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
     host.SendPlayerState(new PlayerStateSnapshot
     {
         Tick = 900,
+        TransitionId = 77,
         PresentMask = 3,
         DeadMask = 2,
         PlayerOneX = 12.5f,
@@ -186,8 +305,19 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         PlayerTwoY = 16.5f,
         PlayerOneHealth = 3,
         PlayerTwoHealth = 0,
+        PlayerOneSuperMeter = 37.5f,
+        PlayerTwoSuperMeter = 12.25f,
         PlayerOneMapHorizontal = -127,
         PlayerOneMapVertical = 64,
+        Flags = PlayerStateFlags.GameplayStarted,
+        PlayerOneHeld = InputButtons.Shoot | InputButtons.Lock,
+        PlayerOnePressed = InputButtons.Super,
+        PlayerOneReleased = InputButtons.Dash,
+        PlayerOneMotionFlags = PlayerMotionFlags.UsingSuperOrEx,
+        PlayerTwoMotionFlags = PlayerMotionFlags.Dashing |
+            PlayerMotionFlags.Hit,
+        PlayerTwoHitDirection = -1,
+        PlayerOneSuperActionSequence = 42,
     });
     PlayerStateSnapshot receivedState = default;
     var stateArrived = false;
@@ -197,12 +327,109 @@ using (var client = UdpInputTransport.CreateClient("127.0.0.1", port, versionTok
         stateArrived = client.TryReceivePlayerState(out receivedState);
         if (!stateArrived) Thread.Sleep(5);
     }
-    Assert(stateArrived && receivedState.Tick == 900 && receivedState.PresentMask == 3 &&
+    Assert(stateArrived && receivedState.Tick == 900 &&
+        receivedState.TransitionId == 77 && receivedState.PresentMask == 3 &&
         receivedState.DeadMask == 2 && receivedState.PlayerOneX == 12.5f &&
         receivedState.PlayerTwoY == 16.5f && receivedState.PlayerOneHealth == 3 &&
+        receivedState.PlayerOneSuperMeter == 37.5f &&
+        receivedState.PlayerTwoSuperMeter == 12.25f &&
         receivedState.PlayerOneMapHorizontal == -127 &&
-        receivedState.PlayerOneMapVertical == 64,
+        receivedState.PlayerOneMapVertical == 64 &&
+        receivedState.Flags == PlayerStateFlags.GameplayStarted &&
+        receivedState.PlayerOneHeld == (InputButtons.Shoot | InputButtons.Lock) &&
+        receivedState.PlayerOnePressed == InputButtons.Super &&
+        receivedState.PlayerOneReleased == InputButtons.Dash &&
+        receivedState.PlayerOneMotionFlags ==
+            PlayerMotionFlags.UsingSuperOrEx &&
+        receivedState.PlayerTwoMotionFlags ==
+            (PlayerMotionFlags.Dashing | PlayerMotionFlags.Hit) &&
+        receivedState.PlayerTwoHitDirection == -1 &&
+        receivedState.PlayerOneSuperActionSequence == 42,
         "El transporte alteró el snapshot de jugadores.");
+
+    var encodedPlayerState = LanPlayerStatePacketCodec.Encode(receivedState);
+    Assert(encodedPlayerState.Length == LanPlayerStatePacketCodec.PacketSize &&
+        LanPlayerStatePacketCodec.TryDecode(encodedPlayerState,
+            out var decodedPlayerState) &&
+        decodedPlayerState.PlayerTwoMotionFlags ==
+            receivedState.PlayerTwoMotionFlags &&
+        decodedPlayerState.PlayerTwoHitDirection == -1 &&
+        decodedPlayerState.PlayerOneSuperActionSequence == 42,
+        "El codec de jugadores alteró un snapshot válido.");
+    Assert(!LanPlayerStatePacketCodec.TryDecode(
+        encodedPlayerState[..^1], out _),
+        "El codec de jugadores aceptó un paquete truncado.");
+
+    var invalidPlayerState = LanPlayerStatePacketCodec.Encode(receivedState);
+    invalidPlayerState[58] = 0x80;
+    Assert(!LanPlayerStatePacketCodec.TryDecode(invalidPlayerState, out _),
+        "El codec de jugadores aceptó flags de movimiento desconocidos.");
+    invalidPlayerState = LanPlayerStatePacketCodec.Encode(receivedState);
+    invalidPlayerState[59] = 2;
+    Assert(!LanPlayerStatePacketCodec.TryDecode(invalidPlayerState, out _),
+        "El codec de jugadores aceptó una dirección de golpe inválida.");
+    invalidPlayerState = LanPlayerStatePacketCodec.Encode(receivedState);
+    Buffer.BlockCopy(BitConverter.GetBytes(float.NaN), 0,
+        invalidPlayerState, 12, 4);
+    Assert(!LanPlayerStatePacketCodec.TryDecode(invalidPlayerState, out _),
+        "El codec de jugadores aceptó una posición no finita.");
+    invalidPlayerState = LanPlayerStatePacketCodec.Encode(receivedState);
+    invalidPlayerState[40] = 0x80;
+    Assert(!LanPlayerStatePacketCodec.TryDecode(invalidPlayerState, out _),
+        "El codec de jugadores aceptó botones desconocidos.");
+
+    host.SendPlayerState(new PlayerStateSnapshot
+    {
+        Tick = 901,
+        PresentMask = 3,
+        PlayerOneHealth = 3,
+        PlayerTwoHealth = 2,
+        PlayerTwoMotionFlags = PlayerMotionFlags.Hit,
+        PlayerTwoHitDirection = 1,
+    });
+    host.SendPlayerState(new PlayerStateSnapshot
+    {
+        Tick = 902,
+        PresentMask = 3,
+        PlayerOneHealth = 3,
+        PlayerTwoHealth = 2,
+    });
+    var coalescedStateArrived = false;
+    for (var attempt = 0; attempt < 100 && !coalescedStateArrived; attempt++)
+    {
+        client.Update();
+        coalescedStateArrived = client.TryReceivePlayerState(out receivedState);
+        if (!coalescedStateArrived) Thread.Sleep(5);
+    }
+    Assert(coalescedStateArrived && receivedState.Tick == 902 &&
+        (receivedState.PlayerTwoMotionFlags & PlayerMotionFlags.Hit) != 0 &&
+        receivedState.PlayerTwoHitDirection == 1,
+        "UDP perdió el evento transitorio de golpe al coalescer PlayerState.");
+
+    host.SendBossState(sentBossState);
+    BossStateSnapshot receivedBossState = default;
+    var bossStateArrived = false;
+    for (var attempt = 0; attempt < 100 && !bossStateArrived; attempt++)
+    {
+        host.Update(); client.Update();
+        bossStateArrived = client.TryReceiveBossState(out receivedBossState);
+        if (!bossStateArrived) Thread.Sleep(5);
+    }
+    Assert(bossStateArrived && receivedBossState.Tick == sentBossState.Tick &&
+        receivedBossState.TransitionId == sentBossState.TransitionId &&
+        receivedBossState.LevelId == sentBossState.LevelId &&
+        receivedBossState.Flags == sentBossState.Flags &&
+        receivedBossState.Phase == sentBossState.Phase &&
+        receivedBossState.ActiveActor == sentBossState.ActiveActor &&
+        receivedBossState.ActionState == sentBossState.ActionState &&
+        receivedBossState.CurrentHealth == sentBossState.CurrentHealth &&
+        receivedBossState.TotalHealth == sentBossState.TotalHealth &&
+        receivedBossState.X == sentBossState.X && receivedBossState.Y == sentBossState.Y &&
+        receivedBossState.ScaleX == sentBossState.ScaleX &&
+        receivedBossState.ScaleY == sentBossState.ScaleY &&
+        receivedBossState.AnimatorStateHash == sentBossState.AnimatorStateHash &&
+        receivedBossState.AnimatorNormalizedTime == sentBossState.AnimatorNormalizedTime,
+        "UDP alteró el snapshot del jefe.");
 
     for (var attempt = 0; attempt < 100 &&
         (host.PingMilliseconds < 0 || client.PingMilliseconds < 0); attempt++)
@@ -263,6 +490,54 @@ using (var relayProcess = System.Diagnostics.Process.Start(new System.Diagnostic
     { internetClient.Update(); internetHost.Update(); relayFrameArrived = internetHost.TryReceive(0, out relayFrame); Thread.Sleep(5); }
     Assert(relayFrameArrived && relayFrame.Tick == 77 && relayFrame.Horizontal == 127 &&
         relayFrame.HasHeld(InputButtons.Jump), "El relay alteró el frame de entrada.");
+
+    for (uint stateTick = 1000; stateTick < 1250; stateTick++)
+    {
+        internetHost.SendPlayerState(new PlayerStateSnapshot
+        {
+            Tick = stateTick,
+            PresentMask = 3,
+            PlayerOneHealth = 3,
+            PlayerTwoHealth = 3,
+            PlayerOnePressed = stateTick == 1000 ?
+                InputButtons.Super : InputButtons.None,
+            PlayerOneReleased = stateTick == 1001 ?
+                InputButtons.Super : InputButtons.None,
+            PlayerTwoMotionFlags = stateTick == 1002 ?
+                PlayerMotionFlags.Hit : PlayerMotionFlags.None,
+            PlayerTwoHitDirection = stateTick == 1002 ? (sbyte)-1 : (sbyte)0,
+        });
+        var relayBossState = sentBossState;
+        relayBossState.Tick = stateTick;
+        internetHost.SendBossState(relayBossState);
+    }
+    PlayerStateSnapshot relayPlayerState = default;
+    BossStateSnapshot relayBossSnapshot = default;
+    var relayPlayerStateArrived = false;
+    var relayBossStateArrived = false;
+    for (var attempt = 0; attempt < 200 &&
+        (!relayPlayerStateArrived || !relayBossStateArrived); attempt++)
+    {
+        internetHost.Update();
+        internetClient.Update();
+        if (!relayPlayerStateArrived)
+            relayPlayerStateArrived = internetClient.TryReceivePlayerState(out relayPlayerState);
+        if (!relayBossStateArrived)
+            relayBossStateArrived = internetClient.TryReceiveBossState(out relayBossSnapshot);
+        if (!relayPlayerStateArrived || !relayBossStateArrived)
+            Thread.Sleep(5);
+    }
+    Assert(relayPlayerStateArrived && relayPlayerState.Tick == 1249 &&
+        relayPlayerState.PlayerOnePressed == InputButtons.Super &&
+        relayPlayerState.PlayerOneReleased == InputButtons.Super &&
+        (relayPlayerState.PlayerTwoMotionFlags & PlayerMotionFlags.Hit) != 0 &&
+        relayPlayerState.PlayerTwoHitDirection == -1,
+        "El relay no conservó el PlayerState más reciente y sus bordes.");
+    Assert(relayBossStateArrived && relayBossSnapshot.Tick == 1249,
+        "El relay no conservó únicamente el BossState más reciente.");
+    Assert(!internetClient.TryReceivePlayerState(out _) &&
+        !internetClient.TryReceiveBossState(out _),
+        "El relay entregó snapshots obsoletos de la cola congestionada.");
     relayProcess.Kill(true);
     relayProcess.WaitForExit();
 }

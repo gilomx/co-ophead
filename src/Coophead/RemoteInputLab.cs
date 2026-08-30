@@ -9,10 +9,19 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x001206;
+        private const uint ModVersionToken = 0x00120B;
         private const float PeerStallSeconds = 1.25f;
         private const float ResumeCountdownSeconds = 3f;
         private const float LongWaitSeconds = 15f;
+        private const float BlockedSceneRequestTimeoutSeconds = 5f;
+        private const float PendingSceneCommandTimeoutSeconds = 10f;
+        private const float PlayerTwoStallProbeSeconds = 0.4f;
+        private const float PlayerTwoLocalMovementThreshold = 3f;
+        private const float PlayerTwoHostMovementThreshold = 12f;
+        private const float RemotePlayerOneSuperDeferralSeconds = 0.35f;
+        private const InputButtons FixedGameplayButtons = InputButtons.Jump |
+            InputButtons.Shoot | InputButtons.Super | InputButtons.SwitchWeapon |
+            InputButtons.Lock | InputButtons.Dash;
 
         private static readonly System.Reflection.MethodInfo MapPlayerJoinedMethod =
             AccessTools.Method(typeof(Map), "OnPlayerJoined", new[] { typeof(PlayerId) });
@@ -27,6 +36,14 @@ namespace Coophead
             AccessTools.Field(typeof(Level), "allowMultiplayer");
         private static readonly System.Reflection.FieldInfo LevelPlayersField =
             AccessTools.Field(typeof(Level), "players");
+        private static readonly System.Reflection.FieldInfo MapPlayerMotorVelocityField =
+            AccessTools.Field(typeof(MapPlayerMotor), "<velocity>k__BackingField");
+        private static readonly System.Reflection.FieldInfo LevelPlayerMotorHitManagerField =
+            AccessTools.Field(typeof(LevelPlayerMotor), "hitManager");
+        private static readonly System.Reflection.FieldInfo LevelPlayerMotorHitDirectionField =
+            LevelPlayerMotorHitManagerField == null ? null :
+                AccessTools.Field(LevelPlayerMotorHitManagerField.FieldType,
+                    "direction");
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -34,6 +51,18 @@ namespace Coophead
 
         private static InputFrame received;
         private static InputButtons previousHeld;
+        private static InputButtons playerTwoPendingPressed;
+        private static InputButtons playerTwoPendingReleased;
+        private static InputButtons playerTwoFixedPressed;
+        private static InputButtons playerTwoFixedReleased;
+        private static InputFrame remotePlayerOneInput;
+        private static InputButtons remotePlayerOnePendingPressed;
+        private static InputButtons remotePlayerOnePendingReleased;
+        private static InputButtons remotePlayerOneFixedPressed;
+        private static InputButtons remotePlayerOneFixedReleased;
+        private static InputFrame hostPlayerOneInput;
+        private static InputButtons previousHostPlayerOneHeld;
+        private static InputButtons previousRemotePlayerOneHeld;
         private static bool playerTwoReported;
         private static bool rewiredReadReported;
         private static uint sourceTick;
@@ -48,8 +77,8 @@ namespace Coophead
         private static SceneCommand pendingRemoteScene;
         private static bool hasPendingRemoteScene;
         private static PlayerStateSnapshot latestRemotePlayerState;
+        private static string latestRemotePlayerStateScene = string.Empty;
         private static bool hasRemotePlayerState;
-        private static bool remotePlayerStatePendingApply;
         private static float lastRemotePlayerStateRealtime;
         private static uint lastRemotePlayerStateTick;
         private static bool hasRemotePlayerStateTick;
@@ -70,6 +99,21 @@ namespace Coophead
         private static bool hostMapAxesReported;
         private static bool remoteMapAxesReported;
         private static bool playerOneVisualReported;
+        private static bool p2PredictionIsolationReported;
+        private static bool playerTwoStallProbeActive;
+        private static bool playerTwoHostFallbackActive;
+        private static float playerTwoStallProbeStartedRealtime;
+        private static Vector2 playerTwoStallProbeLastLocalPosition;
+        private static Vector2 playerTwoStallProbeLastHostPosition;
+        private static float playerTwoStallProbeLocalDistance;
+        private static float playerTwoStallProbeHostDistance;
+        private static int playerTwoConsecutiveStallProbes;
+        private static bool superButtonReported;
+        private static bool lockButtonReported;
+        private static float remotePlayerOneSuperDeferralDeadline;
+        private static uint hostPlayerOneSuperActionSequence;
+        private static uint lastRemotePlayerOneSuperActionSequence;
+        private static bool hasRemotePlayerOneSuperActionSequence;
         private static int originalClientSaveSlot;
         private static bool originalClientPlayerOneIsMugman;
         private static bool originalClientSavePlayerOneIsMugman;
@@ -89,6 +133,21 @@ namespace Coophead
         private static bool hasRemoteInputActivity;
         private static bool remoteClientWaiting;
         private static bool clientHoldAcknowledgedByHost;
+        private static bool sceneTransitionActive;
+        private static uint sceneTransitionId;
+        private static uint currentSceneEpoch;
+        private static string sceneTransitionTarget = string.Empty;
+        private static float sceneTransitionStartedRealtime;
+        private static byte sceneTransitionDifficulty;
+        private static bool backgroundSettingRepairReported;
+        private static bool applyingHostSceneCommand;
+        private static string blockedClientSceneRequest = string.Empty;
+        private static float blockedClientSceneRequestRealtime;
+        private static bool mapBootstrapCompleted;
+        private static bool levelPlayerOneBootstrapCompleted;
+        private static bool levelPlayerTwoBootstrapCompleted;
+        private static bool remoteSceneLoadStarted;
+        private static bool returnToMapAfterAbortedLoad;
 
         public static bool Enabled { get; private set; }
         private static bool IsHost => transportMode == InputTransportMode.LanHost ||
@@ -107,6 +166,21 @@ namespace Coophead
             transport.EstimatedPacketLossPercent;
         public static bool SessionOverlayVisible => Enabled &&
             sessionHoldState != SessionHoldState.None;
+        public static bool SceneTransitionActive => Enabled && sceneTransitionActive;
+        internal static uint CurrentSceneEpoch => currentSceneEpoch;
+        public static bool IsClientReadyForLoadGate(string sceneName)
+        {
+            if (!sceneName.StartsWith("scene_map_"))
+                return true;
+            if (SceneManager.GetActiveScene().name != sceneName || Map.Current == null ||
+                CupheadMapCamera.Current == null)
+                return false;
+            var players = Map.Current.players;
+            if (players == null || players.Length < 2 ||
+                players[0] == null || players[1] == null)
+                return false;
+            return !IsClientSession || mapBootstrapCompleted;
+        }
         public static bool SessionIsResuming =>
             sessionHoldState == SessionHoldState.Resuming;
         public static string SessionHoldReason => sessionHoldReason;
@@ -136,9 +210,17 @@ namespace Coophead
 
         public static void SetRunInBackgroundForTesting(bool enabled)
         {
+            if (!runInBackgroundCaptured)
+            {
+                originalRunInBackground = Application.runInBackground;
+                runInBackgroundCaptured = true;
+            }
             runInBackgroundForTesting = enabled;
+            Application.runInBackground = enabled;
+            backgroundSettingRepairReported = false;
             Plugin.Log.LogInfo("[Testing] RunInBackground temporal: " +
-                (enabled ? "ACTIVADO" : "DESACTIVADO") + ".");
+                (enabled ? "ACTIVADO" : "DESACTIVADO") +
+                " (Unity=" + Application.runInBackground + ").");
         }
 
         public static void StartInternet(bool host, string signalingUrl, string stunHost,
@@ -174,11 +256,6 @@ namespace Coophead
             }
             finally
             {
-                if (runInBackgroundCaptured)
-                {
-                    Application.runInBackground = originalRunInBackground;
-                    runInBackgroundCaptured = false;
-                }
                 RestoreVanillaPlayerManagerState();
             }
         }
@@ -211,13 +288,7 @@ namespace Coophead
             transportMode = mode;
             ResetRemotePlayerState();
             transportWasConnected = false;
-            if (!runInBackgroundCaptured)
-            {
-                originalRunInBackground = Application.runInBackground;
-                runInBackgroundCaptured = true;
-            }
-            if (mode != InputTransportMode.Loopback)
-                Application.runInBackground = runInBackgroundForTesting;
+            Application.runInBackground = runInBackgroundForTesting;
             Plugin.Log.LogInfo("[InputLab] Transporte configurado: " + transport.Description);
         }
 
@@ -244,8 +315,27 @@ namespace Coophead
             if (Input.GetKeyDown(KeyCode.F7) && Enabled)
                 StopSession();
 
+            if (runInBackgroundForTesting && !Application.runInBackground)
+            {
+                Application.runInBackground = true;
+                if (!backgroundSettingRepairReported)
+                {
+                    backgroundSettingRepairReported = true;
+                    Plugin.Log.LogWarning("[Testing] RunInBackground fue restaurado a true.");
+                }
+            }
+
+            TryReturnToMapAfterAbortedLoad();
+
             if (!Enabled)
                 return;
+
+            // Los bordes visibles en Update duran exactamente un frame. Los de
+            // gameplay se copian por separado al siguiente FixedUpdate.
+            received.Pressed = InputButtons.None;
+            received.Released = InputButtons.None;
+            remotePlayerOneInput.Pressed = InputButtons.None;
+            remotePlayerOneInput.Released = InputButtons.None;
 
             transport.Update();
             ProcessConnectionTransition();
@@ -256,8 +346,12 @@ namespace Coophead
             }
             ProcessSessionContexts();
             ProcessSceneCommands();
+            UpdateBlockedClientSceneRequest();
+            UpdatePendingSceneCommandWatchdog();
             ProcessPlayerStates();
+            SlimeBossSynchronizer.ProcessIncoming(transport);
             LevelLoadGate.Update();
+            CompleteSceneTransitionIfPossible();
 
             EnsureMultiplayerState();
             EnsurePlayerTwoPresent();
@@ -267,13 +361,11 @@ namespace Coophead
             sourceTick++;
             if (IsHost && sourceTick % 30 == 0)
                 CaptureAndSendContext(false);
-            if (IsHost && sourceTick % 3 == 0)
+            if (IsHost)
+            {
+                CaptureHostPlayerOneInput();
                 CaptureAndSendPlayerState();
-
-            // Los bordes solo viven durante un tick receptor. Si un transporte no
-            // entrega un frame nuevo, mantenemos ejes/botones pero no repetimos Down/Up.
-            received.Pressed = InputButtons.None;
-            received.Released = InputButtons.None;
+            }
 
             if (IsClient)
             {
@@ -281,21 +373,36 @@ namespace Coophead
                 {
                     var sampled = SampleConfiguredPlayerInput();
                     sampled.Tick = sourceTick;
-                    if (sessionHoldState != SessionHoldState.None ||
-                        LevelLoadGate.IsHoldingGameplay)
+                    var physicalHeld = sampled.Held;
+                    var inputLocked = sessionHoldState != SessionHoldState.None ||
+                        SceneTransitionActive || LevelLoadGate.IsHoldingGameplay ||
+                        IsLevelIntroActive();
+                    if (inputLocked)
                     {
                         sampled.Horizontal = 0;
                         sampled.Vertical = 0;
                         sampled.Held = InputButtons.None;
+                        sampled.Pressed = InputButtons.None;
+                        sampled.Released = InputButtons.None;
                     }
                     if (sessionHoldState != SessionHoldState.None)
                         sampled.Flags |= InputFrameFlags.WaitingForHost;
                     if (LevelLoadGate.ShouldReportReady)
+                    {
                         sampled.Flags |= InputFrameFlags.LevelReady;
-                    sampled.Pressed = sampled.Held & ~previousHeld;
-                    sampled.Released = previousHeld & ~sampled.Held;
-                    previousHeld = sampled.Held;
+                        sampled.ReadyTransitionId = LevelLoadGate.TransitionId;
+                    }
+                    else if (SceneTransitionActive)
+                        sampled.Flags |= InputFrameFlags.Loading;
+                    if (!inputLocked)
+                    {
+                        sampled.Pressed |= sampled.Held & ~previousHeld;
+                        sampled.Released |= previousHeld & ~sampled.Held;
+                    }
+                    previousHeld = physicalHeld;
                     received = sampled;
+                    QueuePlayerTwoFixedEdges(sampled.Pressed, sampled.Released);
+                    ReportPlayerTwoCombatButtons("detectó localmente", sampled);
                     transport.Send(sampled);
                     localFramesSent++;
                     if (!localFrameSentReported)
@@ -325,8 +432,8 @@ namespace Coophead
             {
                 var sampled = SampleLabKeyboardInput();
                 sampled.Tick = sourceTick;
-                sampled.Pressed = sampled.Held & ~previousHeld;
-                sampled.Released = previousHeld & ~sampled.Held;
+                sampled.Pressed |= sampled.Held & ~previousHeld;
+                sampled.Released |= previousHeld & ~sampled.Held;
                 previousHeld = sampled.Held;
                 transport.Send(sampled);
             }
@@ -348,6 +455,8 @@ namespace Coophead
                 {
                     received.Pressed = pressed;
                     received.Released = released;
+                    QueuePlayerTwoFixedEdges(pressed, released);
+                    ReportPlayerTwoCombatButtons("recibió del invitado", received);
                     if (!remoteFrameReceivedReported)
                     {
                         remoteFrameReceivedReported = true;
@@ -366,17 +475,57 @@ namespace Coophead
                     hasRemoteInputActivity = true;
                     var clientWaiting = (received.Flags &
                         InputFrameFlags.WaitingForHost) != 0;
-                    if (clientWaiting && !remoteClientWaiting && IsHost)
+                    if (!SceneTransitionActive && clientWaiting &&
+                        !remoteClientWaiting && IsHost)
                         BeginHostResumeCountdown("El invitado espera al anfitrión.");
                     remoteClientWaiting = clientWaiting;
                     if ((received.Flags & InputFrameFlags.LevelReady) != 0 &&
-                        LevelLoadGate.OnGuestReady())
+                        LevelLoadGate.OnGuestReady(
+                            received.ReadyTransitionId))
                         CaptureAndSendContext(true);
                 }
             }
 
             UpdateSessionHold();
 
+        }
+
+        public static void LateTick()
+        {
+            if (!Enabled || !transport.IsConnected)
+                return;
+
+            if (IsHost)
+            {
+                var transitionId = sceneTransitionActive &&
+                    SceneManager.GetActiveScene().name == sceneTransitionTarget ?
+                    sceneTransitionId : currentSceneEpoch;
+                SlimeBossSynchronizer.CaptureAndSend(
+                    transport, sourceTick, transitionId);
+            }
+            else if (IsClient)
+            {
+                SlimeBossSynchronizer.ApplyLatest();
+                ApplyPlayerTwoHostFallback();
+            }
+        }
+
+        public static void AdvanceFixedInput()
+        {
+            if (!Enabled)
+            {
+                ResetInputEdgeLatches();
+                return;
+            }
+
+            playerTwoFixedPressed = playerTwoPendingPressed;
+            playerTwoFixedReleased = playerTwoPendingReleased;
+            playerTwoPendingPressed = InputButtons.None;
+            playerTwoPendingReleased = InputButtons.None;
+            remotePlayerOneFixedPressed = remotePlayerOnePendingPressed;
+            remotePlayerOneFixedReleased = remotePlayerOnePendingReleased;
+            remotePlayerOnePendingPressed = InputButtons.None;
+            remotePlayerOnePendingReleased = InputButtons.None;
         }
 
         private static void SetEnabled(bool enabled)
@@ -388,7 +537,10 @@ namespace Coophead
             }
             Enabled = enabled;
             previousHeld = InputButtons.None;
+            previousHostPlayerOneHeld = InputButtons.None;
             received = new InputFrame();
+            remotePlayerOneInput = new InputFrame();
+            ResetInputEdgeLatches();
             sourceTick = 0;
             transport.Reset();
             playerTwoReported = false;
@@ -413,12 +565,36 @@ namespace Coophead
             hostMapAxesReported = false;
             remoteMapAxesReported = false;
             playerOneVisualReported = false;
+            p2PredictionIsolationReported = false;
+            ResetPlayerTwoStallFallback();
+            superButtonReported = false;
+            lockButtonReported = false;
+            hostPlayerOneSuperActionSequence = 0;
+            lastRemotePlayerOneSuperActionSequence = 0;
+            hasRemotePlayerOneSuperActionSequence = false;
             lastRemoteInputRealtime = 0f;
             hasRemoteInputActivity = false;
             remoteClientWaiting = false;
             clientHoldAcknowledgedByHost = false;
+            sceneTransitionActive = false;
+            sceneTransitionId = 0;
+            currentSceneEpoch = 0;
+            sceneTransitionTarget = string.Empty;
+            sceneTransitionStartedRealtime = 0f;
+            sceneTransitionDifficulty = (byte)Level.Mode.Normal;
+            applyingHostSceneCommand = false;
+            blockedClientSceneRequest = string.Empty;
+            blockedClientSceneRequestRealtime = 0f;
+            mapBootstrapCompleted = false;
+            levelPlayerOneBootstrapCompleted = false;
+            levelPlayerTwoBootstrapCompleted = false;
+            remoteSceneLoadStarted = false;
+            backgroundSettingRepairReported = false;
             if (enabled)
+            {
+                returnToMapAfterAbortedLoad = false;
                 ResetSessionHoldState(false);
+            }
             if (enabled && IsClient)
                 CaptureOriginalClientContext();
             Plugin.Log.LogMessage("Remote Input Lab " + (Enabled ? "ACTIVADO" : "DESACTIVADO") +
@@ -436,14 +612,14 @@ namespace Coophead
             var now = Time.realtimeSinceStartup;
             if (IsHost)
             {
-                if (transport.IsConnected && hasRemoteInputActivity &&
+                if (!SceneTransitionActive && transport.IsConnected && hasRemoteInputActivity &&
                     sessionHoldState == SessionHoldState.None &&
                     now - lastRemoteInputRealtime >= PeerStallSeconds)
                 {
                     EnterSessionWait("Esperando al invitado.");
                     CaptureAndSendContext(true);
                 }
-                else if (transport.IsConnected && hasRemoteInputActivity &&
+                else if (!SceneTransitionActive && transport.IsConnected && hasRemoteInputActivity &&
                     sessionHoldState == SessionHoldState.Waiting &&
                     now - lastRemoteInputRealtime < 0.25f)
                 {
@@ -455,11 +631,9 @@ namespace Coophead
                 return;
             }
 
-            if (!IsClient || sessionHoldState != SessionHoldState.None ||
-                !hasRemotePlayerState)
-                return;
-            if (now - lastRemotePlayerStateRealtime >= PeerStallSeconds)
-                EnterSessionWait("Esperando al anfitrión.");
+            // La ausencia breve de snapshots no equivale a pérdida de foco: durante
+            // SceneLoader no existen jugadores que capturar. Una caída real queda a
+            // cargo del heartbeat/timeout del transporte y del aviso explícito de foco.
         }
 
         private static void EnterSessionWait(string reason)
@@ -478,6 +652,9 @@ namespace Coophead
             resumeDeadlineRealtime = 0f;
             lastResumeSecondsSent = byte.MaxValue;
             received = new InputFrame();
+            remotePlayerOneInput.Pressed = InputButtons.None;
+            remotePlayerOneInput.Released = InputButtons.None;
+            ResetInputEdgeLatches();
             ApplySessionPause();
             Plugin.Log.LogWarning("[SessionHold] " + sessionHoldReason);
         }
@@ -622,6 +799,73 @@ namespace Coophead
                 ReleaseSessionPause();
         }
 
+        public static void AbortCoordinatedLoad()
+        {
+            if (!Enabled || !LevelLoadGate.IsActive)
+                return;
+            var shouldReturnToMap = LevelLoadGate.TargetIsLevel;
+            Plugin.Log.LogWarning("[ReadyGate] El usuario canceló la carga coordinada.");
+            try
+            {
+                if (IsHost && transport.IsConnected &&
+                    !string.IsNullOrEmpty(sceneTransitionTarget))
+                {
+                    transport.SendScene(new SceneCommand
+                    {
+                        SceneName = sceneTransitionTarget,
+                        LoadMode = (byte)LoadSceneMode.Single,
+                        LevelId = -1,
+                        Difficulty = sceneTransitionDifficulty,
+                        Flags = SceneCommandFlags.CancelCoordinatedTransition,
+                    });
+                    // UdpInputTransport conserva los comandos hasta recibir ACK, pero
+                    // StopSession cierra el socket enseguida. Este Update envía el
+                    // aviso al menos una vez antes de cerrar; el timeout de conexión
+                    // sigue siendo la recuperación secundaria del invitado.
+                    transport.Update();
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning("[ReadyGate] No se pudo avisar la cancelación: " +
+                    ex.Message);
+            }
+            StopSession();
+            returnToMapAfterAbortedLoad = shouldReturnToMap;
+        }
+
+        private static void TryReturnToMapAfterAbortedLoad()
+        {
+            if (!returnToMapAfterAbortedLoad || SceneLoader.CurrentlyLoading)
+                return;
+
+            returnToMapAfterAbortedLoad = false;
+            try
+            {
+                if (SceneLoader.Exists && PlayerData.Data != null)
+                {
+                    PlayerData.inGame = true;
+                    // Esta carga es una recuperación interna, no una selección local
+                    // del invitado; debe atravesar el prefijo de autoridad de escena.
+                    applyingHostSceneCommand = true;
+                    try
+                    {
+                        SceneLoader.LoadLastMap();
+                    }
+                    finally
+                    {
+                        applyingHostSceneCommand = false;
+                    }
+                    Plugin.Log.LogMessage("[ReadyGate] Regresando al mapa tras cancelar la carga.");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning("[ReadyGate] No se pudo regresar al mapa: " +
+                    ex.Message);
+            }
+        }
+
         private static void ResetSessionHoldState(bool releasePause)
         {
             sessionHoldState = SessionHoldState.None;
@@ -673,7 +917,7 @@ namespace Coophead
                         players[1] != null ||
                         LevelNewPlayerGUI.Current == null)
                         return;
-                    if (!IsMapReadyForLateSpawn(players))
+                    if (!IsMapReadyForPlayerTwoCreation(players))
                         return;
                     target = Map.Current;
                     method = MapPlayerJoinedMethod;
@@ -736,11 +980,32 @@ namespace Coophead
 
         private static bool IsMapReadyForLateSpawn(MapPlayerController[] players)
         {
+            var heldAtCoordinatedMapExit = SceneTransitionActive &&
+                LevelLoadGate.IsActive && sceneTransitionTarget.StartsWith("scene_map_") &&
+                SceneManager.GetActiveScene().name == sceneTransitionTarget;
+            var loaderReady = SceneLoader.Exists &&
+                ((!SceneLoader.CurrentlyLoading && !SceneLoader.IsInIrisTransition &&
+                !SceneLoader.IsInBlurTransition) || heldAtCoordinatedMapExit);
             return Map.Current != null && Map.Current.CurrentState == Map.State.Ready &&
-                SceneLoader.Exists && !SceneLoader.CurrentlyLoading &&
-                !SceneLoader.IsInIrisTransition && !SceneLoader.IsInBlurTransition &&
+                loaderReady &&
                 players != null && players.Length > 0 && players[0] != null &&
                 players[0].state != MapPlayerController.State.Stationary;
+        }
+
+        private static bool IsMapReadyForPlayerTwoCreation(MapPlayerController[] players)
+        {
+            var heldAtCoordinatedMapExit = SceneTransitionActive &&
+                LevelLoadGate.IsActive && sceneTransitionTarget.StartsWith("scene_map_") &&
+                SceneManager.GetActiveScene().name == sceneTransitionTarget;
+            if (!heldAtCoordinatedMapExit)
+                return IsMapReadyForLateSpawn(players);
+
+            // Durante el gate, start_cr debe seguir vivo y puede no haber llegado a
+            // Map.State.Ready. Para el bootstrap sólo hace falta que P1 y el flujo
+            // cooperativo de creación ya existan; P2 puede seguir Stationary hasta
+            // que Cuphead termine naturalmente sus eventos del mapa.
+            return SceneLoader.Exists && Map.Current != null &&
+                players != null && players.Length > 0 && players[0] != null;
         }
 
         private static void RecoverLateSpawnedMapPlayer()
@@ -788,7 +1053,9 @@ namespace Coophead
 
             try
             {
-                return object.ReferenceEquals(player, PlayerManager.GetPlayerInput(PlayerId.PlayerTwo));
+                var expected = PlayerManager.GetPlayerInput(PlayerId.PlayerTwo);
+                return object.ReferenceEquals(player, expected) ||
+                    (expected == null && player.id == 1);
             }
             catch
             {
@@ -798,14 +1065,17 @@ namespace Coophead
 
         public static bool ShouldSuppressPlayerOne(Player player)
         {
-            if (!IsClientSession || samplingLocalInput || player == null)
+            if (!IsClientSession || !transport.IsConnected || samplingLocalInput ||
+                player == null)
                 return false;
 
             try
             {
-                if (!HasPlayerTwoActor())
+                if (Map.Current == null && Level.Current == null && !HasPlayerTwoActor())
                     return false;
-                return object.ReferenceEquals(player, PlayerManager.GetPlayerInput(PlayerId.PlayerOne));
+                var expected = PlayerManager.GetPlayerInput(PlayerId.PlayerOne);
+                return object.ReferenceEquals(player, expected) ||
+                    (expected == null && player.id == 0);
             }
             catch
             {
@@ -815,13 +1085,14 @@ namespace Coophead
 
         public static bool ShouldOverridePlayerOneVisual(Player player)
         {
-            if (!CanDriveRemotePlayerOneMapVisual() || player == null)
+            if (!CanDriveRemotePlayerOneVisual() || player == null)
                 return false;
 
             try
             {
-                return object.ReferenceEquals(player,
-                    PlayerManager.GetPlayerInput(PlayerId.PlayerOne));
+                var expected = PlayerManager.GetPlayerInput(PlayerId.PlayerOne);
+                return object.ReferenceEquals(player, expected) ||
+                    (expected == null && player.id == 0);
             }
             catch
             {
@@ -829,22 +1100,47 @@ namespace Coophead
             }
         }
 
-        public static float GetRemotePlayerOneMapAxis(int actionId)
+        public static float GetRemotePlayerOneAxis(int actionId)
         {
-            if (!CanDriveRemotePlayerOneMapVisual())
+            if (!CanDriveRemotePlayerOneVisual())
                 return 0f;
             if (!playerOneVisualReported)
             {
                 playerOneVisualReported = true;
                 Plugin.Log.LogMessage("[StateSync] Player One remoto activó su motor visual " +
-                    "(H=" + latestRemotePlayerState.PlayerOneMapHorizontal + " V=" +
-                    latestRemotePlayerState.PlayerOneMapVertical + ").");
+                    "(H=" + remotePlayerOneInput.Horizontal + " V=" +
+                    remotePlayerOneInput.Vertical + " botones=" +
+                    (uint)remotePlayerOneInput.Held + ").");
             }
-            if (actionId == 0)
-                return latestRemotePlayerState.PlayerOneMapHorizontal / 127f;
-            if (actionId == 1)
-                return latestRemotePlayerState.PlayerOneMapVertical / 127f;
-            return 0f;
+            return remotePlayerOneInput.GetAxis(actionId);
+        }
+
+        public static bool GetRemotePlayerOneButton(int actionId, ButtonPhase phase)
+        {
+            if (!CanDriveRemotePlayerOneVisual())
+                return false;
+            var button = MapButton(actionId);
+            if (button == InputButtons.None)
+                return false;
+            if (phase == ButtonPhase.Pressed)
+            {
+                var edges = (FixedGameplayButtons & button) != 0 ?
+                    remotePlayerOneFixedPressed : remotePlayerOneInput.Pressed;
+                return (edges & button) != 0;
+            }
+            if (phase == ButtonPhase.Released)
+            {
+                var edges = (FixedGameplayButtons & button) != 0 ?
+                    remotePlayerOneFixedReleased : remotePlayerOneInput.Released;
+                return (edges & button) != 0;
+            }
+            return remotePlayerOneInput.HasHeld(button);
+        }
+
+        public static float GetRemotePlayerOneButtonTimePressed(int actionId)
+        {
+            return GetRemotePlayerOneButton(actionId, ButtonPhase.Held) ?
+                Mathf.Max(Time.fixedDeltaTime, 0.001f) : 0f;
         }
 
         public static bool TryGetPlayerInputAxes(PlayerInput input, out float horizontal,
@@ -857,16 +1153,16 @@ namespace Coophead
 
             if (input.playerId == PlayerId.PlayerTwo && DrivesPlayerTwo)
             {
-                horizontal = received.Horizontal / 127f;
-                vertical = received.Vertical / 127f;
+                horizontal = GetAxis(0);
+                vertical = GetAxis(1);
                 ReportRewiredRead();
                 return true;
             }
 
-            if (input.playerId != PlayerId.PlayerOne || !CanDriveRemotePlayerOneMapVisual())
+            if (input.playerId != PlayerId.PlayerOne || !CanDriveRemotePlayerOneVisual())
                 return false;
-            horizontal = latestRemotePlayerState.PlayerOneMapHorizontal / 127f;
-            vertical = latestRemotePlayerState.PlayerOneMapVertical / 127f;
+            horizontal = remotePlayerOneInput.Horizontal / 127f;
+            vertical = remotePlayerOneInput.Vertical / 127f;
             return true;
         }
 
@@ -882,16 +1178,64 @@ namespace Coophead
                 ReportRewiredRead();
                 return true;
             }
-            return input.playerId == PlayerId.PlayerOne &&
-                CanDriveRemotePlayerOneMapVisual();
+            if (input.playerId != PlayerId.PlayerOne || !CanDriveRemotePlayerOneVisual())
+                return false;
+            value = GetRemotePlayerOneButton((int)button, ButtonPhase.Held);
+            return true;
         }
 
-        private static bool CanDriveRemotePlayerOneMapVisual()
+        private static bool CanDriveRemotePlayerOneVisual()
         {
-            return IsClientSession && transport.IsConnected && !samplingLocalInput &&
-                Map.Current != null && HasPlayerTwoActor() && hasRemotePlayerState &&
-                (latestRemotePlayerState.PresentMask & 1) != 0 &&
-                Time.realtimeSinceStartup - lastRemotePlayerStateRealtime <= 0.5f;
+            if (!IsClientSession || !transport.IsConnected || samplingLocalInput ||
+                !HasPlayerTwoActor() || !hasRemotePlayerState ||
+                Time.realtimeSinceStartup - lastRemotePlayerStateRealtime > 0.5f)
+                return false;
+            if ((latestRemotePlayerState.PresentMask & 1) == 0)
+                return false;
+            if (Map.Current != null)
+                return true;
+            return Level.Current != null && Level.Current.Started &&
+                (latestRemotePlayerState.Flags & PlayerStateFlags.GameplayStarted) != 0;
+        }
+
+        internal static bool ShouldDeferRemotePlayerOneSuperMeter(
+            float currentMeter, float authoritativeMeter)
+        {
+            return IsClientSession && transport.IsConnected &&
+                remotePlayerOneSuperDeferralDeadline > 0f &&
+                authoritativeMeter < currentMeter &&
+                Time.realtimeSinceStartup <=
+                    remotePlayerOneSuperDeferralDeadline;
+        }
+
+        internal static void NotifyPlayerOneSuperConsumed(
+            PlayerStatsManager stats)
+        {
+            if (!Enabled || stats == null)
+                return;
+            try
+            {
+                var player = PlayerManager.GetPlayer(PlayerId.PlayerOne);
+                if (player == null || !object.ReferenceEquals(player.stats, stats))
+                    return;
+                if (IsHostSession && transport.IsConnected)
+                {
+                    hostPlayerOneSuperActionSequence++;
+                    if (hostPlayerOneSuperActionSequence == 0)
+                        hostPlayerOneSuperActionSequence = 1;
+                    return;
+                }
+                if (!IsClientSession ||
+                    remotePlayerOneSuperDeferralDeadline <= 0f)
+                    return;
+                remotePlayerOneSuperDeferralDeadline = 0f;
+                Plugin.Log.LogInfo("[StateSync] El EX/Super remoto consumió " +
+                    "su carta visual; se reanuda el medidor autoritativo.");
+            }
+            catch
+            {
+                // El jugador puede estar cerrándose al cambiar de escena.
+            }
         }
 
         private static void ProcessConnectionTransition()
@@ -910,7 +1254,11 @@ namespace Coophead
             }
             else if (!connected && transportWasConnected)
             {
-                if (IsClient)
+                var interruptedLevelLoad = IsClient &&
+                    sceneTransitionTarget.StartsWith("scene_level_") &&
+                    (remoteSceneLoadStarted || SceneLoader.CurrentlyLoading ||
+                        SceneManager.GetActiveScene().name == sceneTransitionTarget);
+                if (IsClient && !interruptedLevelLoad)
                     EnterSessionWait("Se perdió la señal del anfitrión. Reconectando.");
                 else if (IsHost)
                     EnterSessionWait("Se perdió la señal del invitado. Reconectando.");
@@ -922,8 +1270,126 @@ namespace Coophead
                 hasRemoteContext = false;
                 hasPendingRemoteScene = false;
                 hasRemoteInputActivity = false;
+                CancelSceneTransition("La conexión se interrumpió durante el cambio de escena.");
+                if (interruptedLevelLoad)
+                {
+                    StopSession();
+                    returnToMapAfterAbortedLoad = true;
+                }
             }
             transportWasConnected = connected;
+        }
+
+        public static bool OnSceneLoadRequested(string sceneName)
+        {
+            if (!Enabled || !IsStableScene(sceneName, LoadSceneMode.Single))
+                return true;
+
+            if (IsClient && transport.IsConnected && !applyingHostSceneCommand)
+            {
+                blockedClientSceneRequest = sceneName;
+                blockedClientSceneRequestRealtime = Time.realtimeSinceStartup;
+                Plugin.Log.LogMessage("[SceneSync] El invitado solicitó " + sceneName +
+                    "; esperando la orden autoritativa del host.");
+                return false;
+            }
+
+            OnLocalSceneLoadStarting(sceneName);
+            return true;
+        }
+
+        private static void OnLocalSceneLoadStarting(string sceneName)
+        {
+            if (!Enabled || !IsHost || !transport.IsConnected ||
+                !IsStableScene(sceneName, LoadSceneMode.Single))
+                return;
+
+            var levelId = -1;
+            if (sceneName.StartsWith("scene_level_"))
+            {
+                try
+                {
+                    var candidate = SceneLoader.CurrentLevel;
+                    if (LevelProperties.GetLevelScene(candidate) == sceneName)
+                        levelId = (int)candidate;
+                }
+                catch { }
+            }
+
+            var difficulty = (byte)Level.CurrentMode;
+            var transitionId = transport.SendScene(new SceneCommand
+            {
+                SceneName = sceneName,
+                LoadMode = (byte)LoadSceneMode.Single,
+                LevelId = levelId,
+                Difficulty = difficulty,
+                Flags = SceneCommandFlags.CoordinatedTransition,
+            });
+            BeginSceneTransition(sceneName, levelId, transitionId, difficulty, true);
+            CaptureAndSendContext(true);
+            // El prefijo corre justo antes de que Unity pueda bloquear el hilo con
+            // la carga; forzamos el primer envío en este mismo frame.
+            transport.Update();
+            Plugin.Log.LogInfo("[SceneSync] Transición #" + transitionId +
+                " preanunciada: " + sceneName + ".");
+        }
+
+        private static void BeginSceneTransition(string sceneName, int levelId,
+            uint transitionId, byte difficulty, bool coordinated)
+        {
+            if (transitionId == 0 || string.IsNullOrEmpty(sceneName))
+                return;
+            sceneTransitionActive = true;
+            sceneTransitionId = transitionId;
+            currentSceneEpoch = transitionId;
+            sceneTransitionTarget = sceneName;
+            sceneTransitionStartedRealtime = Time.realtimeSinceStartup;
+            sceneTransitionDifficulty = difficulty;
+            remoteSceneLoadStarted = false;
+            if (sceneName.StartsWith("scene_map_"))
+                mapBootstrapCompleted = false;
+            levelPlayerOneBootstrapCompleted = false;
+            ClearRemotePlayerState();
+            received = new InputFrame();
+            previousHeld = InputButtons.None;
+            previousHostPlayerOneHeld = InputButtons.None;
+            ResetInputEdgeLatches();
+            remoteClientWaiting = false;
+            lastRemoteInputRealtime = Time.realtimeSinceStartup;
+            if (coordinated)
+                LevelLoadGate.BeginTransition(sceneName, levelId, transitionId);
+            else
+                LevelLoadGate.Reset();
+        }
+
+        private static void CompleteSceneTransitionIfPossible()
+        {
+            if (!sceneTransitionActive || SceneLoader.CurrentlyLoading ||
+                LevelLoadGate.IsHoldingGameplay ||
+                Time.realtimeSinceStartup - sceneTransitionStartedRealtime < 0.25f ||
+                SceneManager.GetActiveScene().name != sceneTransitionTarget)
+                return;
+            if (sceneTransitionTarget.StartsWith("scene_level_") &&
+                (Level.Current == null || !Level.Current.Started))
+                return;
+
+            var completedId = sceneTransitionId;
+            sceneTransitionActive = false;
+            sceneTransitionId = 0;
+            sceneTransitionTarget = string.Empty;
+            sceneTransitionStartedRealtime = 0f;
+            sceneTransitionDifficulty = (byte)Level.Mode.Normal;
+            remoteSceneLoadStarted = false;
+            received = new InputFrame();
+            remotePlayerOneInput = new InputFrame();
+            previousHeld = InputButtons.None;
+            previousHostPlayerOneHeld = InputButtons.None;
+            ResetInputEdgeLatches();
+            remoteClientWaiting = false;
+            lastRemoteInputRealtime = Time.realtimeSinceStartup;
+            LevelLoadGate.Reset();
+            Plugin.Log.LogMessage("[SceneSync] Transición #" + completedId +
+                " completada sin activar espera de sesión.");
         }
 
         private static void SendCurrentScene()
@@ -935,6 +1401,9 @@ namespace Coophead
             {
                 SceneName = scene.name,
                 LoadMode = (byte)LoadSceneMode.Single,
+                LevelId = Level.Current == null ? -1 : (int)Level.Current.CurrentLevel,
+                Difficulty = (byte)Level.CurrentMode,
+                Flags = SceneCommandFlags.None,
             });
             Plugin.Log.LogInfo("[SceneSync] Escena encolada: " + scene.name);
         }
@@ -942,7 +1411,14 @@ namespace Coophead
         public static void OnSceneLoaded(string sceneName, LoadSceneMode mode)
         {
             LevelLoadGate.OnSceneLoaded(sceneName);
+            if (sceneTransitionActive && sceneName == sceneTransitionTarget)
+                Level.SetCurrentMode((Level.Mode)sceneTransitionDifficulty);
             ClearRemotePlayerState();
+            SlimeBossSynchronizer.Reset();
+            levelPlayerOneBootstrapCompleted = false;
+            levelPlayerTwoBootstrapCompleted = false;
+            if (Enabled && IsClient && sceneName.StartsWith("scene_map_"))
+                mapBootstrapCompleted = false;
             lateSpawnAttempted = false;
             ResetLateSpawnRecovery();
             lateSpawnFailureReported = false;
@@ -950,12 +1426,6 @@ namespace Coophead
                 return;
 
             CaptureAndSendContext(true);
-            transport.SendScene(new SceneCommand
-            {
-                SceneName = sceneName,
-                LoadMode = (byte)mode,
-            });
-            Plugin.Log.LogInfo("[SceneSync] Escena encolada: " + sceneName);
         }
 
         private static void ProcessSceneCommands()
@@ -967,9 +1437,46 @@ namespace Coophead
             while (transport.TryReceiveScene(out command))
             {
                 Plugin.Log.LogMessage("[SceneSync] Escena recibida: " + command.SceneName +
-                    " #" + command.Sequence);
-                if (!IsStableScene(command.SceneName, (LoadSceneMode)command.LoadMode))
+                    " #" + command.Sequence + " difficulty=" + command.Difficulty +
+                    " coordinated=" + command.IsCoordinatedTransition + ".");
+                if (command.CancelsCoordinatedTransition)
+                {
+                    var cancellationMatches =
+                        sceneTransitionTarget == command.SceneName ||
+                        blockedClientSceneRequest == command.SceneName ||
+                        SceneManager.GetActiveScene().name == command.SceneName;
+                    if (!cancellationMatches)
+                        continue;
+                    var shouldReturnToMap = command.SceneName.StartsWith("scene_level_") &&
+                        (remoteSceneLoadStarted || SceneLoader.CurrentlyLoading ||
+                            SceneManager.GetActiveScene().name == command.SceneName);
+                    CancelSceneTransition("El host canceló la carga coordinada.");
+                    StopSession();
+                    if (shouldReturnToMap)
+                        returnToMapAfterAbortedLoad = true;
                     continue;
+                }
+                if (!IsStableScene(command.SceneName, (LoadSceneMode)command.LoadMode) ||
+                    command.Difficulty > 2)
+                    continue;
+                var targetAlreadyActive =
+                    SceneManager.GetActiveScene().name == command.SceneName;
+                Level.SetCurrentMode((Level.Mode)command.Difficulty);
+                if (command.IsCoordinatedTransition &&
+                    (!sceneTransitionActive || sceneTransitionId != command.Sequence))
+                    BeginSceneTransition(command.SceneName, command.LevelId,
+                        command.Sequence, command.Difficulty, true);
+                else if (!targetAlreadyActive && !command.IsCoordinatedTransition)
+                    BeginSceneTransition(command.SceneName, command.LevelId,
+                        command.Sequence, command.Difficulty, false);
+                if (targetAlreadyActive && command.IsCoordinatedTransition &&
+                    !SceneLoader.CurrentlyLoading)
+                    LevelLoadGate.AdoptAlreadyLoadedTransition(command.SceneName);
+                if (blockedClientSceneRequest == command.SceneName)
+                {
+                    blockedClientSceneRequest = string.Empty;
+                    blockedClientSceneRequestRealtime = 0f;
+                }
                 pendingRemoteScene = command;
                 hasPendingRemoteScene = true;
                 if (RequiresSessionContext(command.SceneName) && !hasRemoteContext)
@@ -1000,12 +1507,13 @@ namespace Coophead
                 return;
             try
             {
-                LoadRemoteScene(command.SceneName);
+                LoadRemoteScene(command);
             }
             catch (System.Exception ex)
             {
                 Plugin.Log.LogWarning("[SceneSync] No se pudo cargar " + command.SceneName +
                     ": " + ex.Message);
+                CancelSceneTransition("Falló la carga de " + command.SceneName + ".");
             }
         }
 
@@ -1014,38 +1522,139 @@ namespace Coophead
             return sceneName != "scene_title" && sceneName != "scene_slot_select";
         }
 
-        private static void LoadRemoteScene(string sceneName)
+        private static void LoadRemoteScene(SceneCommand command)
         {
+            var sceneName = command.SceneName;
             if (!SceneLoader.Exists || SceneLoader.CurrentlyLoading)
             {
                 Plugin.Log.LogWarning("[SceneSync] El cargador de Cuphead todavía no está disponible.");
                 return;
             }
 
-            if (sceneName.StartsWith("scene_level_") && hasRemoteContext &&
-                (latestRemoteContext.Flags & 4) != 0 && latestRemoteContext.CurrentLevel >= 0)
+            applyingHostSceneCommand = true;
+            try
             {
-                SceneLoader.LoadLevel(
-                    (Levels)latestRemoteContext.CurrentLevel,
+                Level.SetCurrentMode((Level.Mode)command.Difficulty);
+                var canLoadAsLevel = false;
+                if (sceneName.StartsWith("scene_level_") && command.LevelId >= 0)
+                {
+                    try
+                    {
+                        canLoadAsLevel = LevelProperties.GetLevelScene(
+                            (Levels)command.LevelId) == sceneName;
+                    }
+                    catch { }
+                }
+                if (canLoadAsLevel)
+                {
+                    SceneLoader.LoadLevel(
+                        (Levels)command.LevelId,
+                        SceneLoader.Transition.Fade,
+                        SceneLoader.Icon.Hourglass,
+                        null);
+                    remoteSceneLoadStarted = true;
+                    Plugin.Log.LogMessage("[SceneSync] Cuphead cargando nivel remoto " +
+                        command.LevelId + " en dificultad " + command.Difficulty +
+                        " (transición #" + command.Sequence + ").");
+                    return;
+                }
+
+                if (!System.Enum.IsDefined(typeof(Scenes), sceneName))
+                    throw new System.ArgumentException("Escena desconocida: " + sceneName);
+                var scene = (Scenes)System.Enum.Parse(typeof(Scenes), sceneName);
+
+                SceneLoader.LoadScene(
+                    scene,
+                    SceneLoader.Transition.Fade,
                     SceneLoader.Transition.Fade,
                     SceneLoader.Icon.Hourglass,
                     null);
-                Plugin.Log.LogMessage("[SceneSync] Cuphead cargando nivel remoto " +
-                    latestRemoteContext.CurrentLevel + ".");
-                return;
+                remoteSceneLoadStarted = true;
+                Plugin.Log.LogMessage("[SceneSync] Cuphead cargando escena remota " +
+                    sceneName + ".");
             }
+            finally
+            {
+                applyingHostSceneCommand = false;
+            }
+        }
 
-            if (!System.Enum.IsDefined(typeof(Scenes), sceneName))
-                throw new System.ArgumentException("Escena desconocida: " + sceneName);
-            var scene = (Scenes)System.Enum.Parse(typeof(Scenes), sceneName);
+        private static void UpdateBlockedClientSceneRequest()
+        {
+            if (!IsClient || string.IsNullOrEmpty(blockedClientSceneRequest) ||
+                sceneTransitionActive ||
+                Time.realtimeSinceStartup - blockedClientSceneRequestRealtime <
+                    BlockedSceneRequestTimeoutSeconds)
+                return;
 
-            SceneLoader.LoadScene(
-                scene,
-                SceneLoader.Transition.Fade,
-                SceneLoader.Transition.Fade,
-                SceneLoader.Icon.Hourglass,
-                null);
-            Plugin.Log.LogMessage("[SceneSync] Cuphead cargando escena remota " + sceneName + ".");
+            var timedOutScene = blockedClientSceneRequest;
+            blockedClientSceneRequest = string.Empty;
+            blockedClientSceneRequestRealtime = 0f;
+            RestoreBlockedClientMapMenus();
+            Plugin.Log.LogWarning("[SceneSync] El host no confirmó " + timedOutScene +
+                " en " + BlockedSceneRequestTimeoutSeconds +
+                " segundos; se cerró el menú bloqueado del invitado.");
+        }
+
+        private static void RestoreBlockedClientMapMenus()
+        {
+            if (Map.Current == null)
+                return;
+            try
+            {
+                if (MapDifficultySelectStartUI.Current != null &&
+                    MapDifficultySelectStartUI.Current.CurrentState ==
+                        AbstractMapSceneStartUI.State.Loading)
+                    MapDifficultySelectStartUI.Current.Out();
+                if (MapConfirmStartUI.Current != null &&
+                    MapConfirmStartUI.Current.CurrentState ==
+                        AbstractMapSceneStartUI.State.Loading)
+                    MapConfirmStartUI.Current.Out();
+                if (MapBasicStartUI.Current != null &&
+                    MapBasicStartUI.Current.CurrentState ==
+                        AbstractMapSceneStartUI.State.Loading)
+                    MapBasicStartUI.Current.Out();
+            }
+            catch { }
+        }
+
+        private static void UpdatePendingSceneCommandWatchdog()
+        {
+            if (!IsClient || !sceneTransitionActive || !hasPendingRemoteScene ||
+                remoteSceneLoadStarted ||
+                Time.realtimeSinceStartup - sceneTransitionStartedRealtime <
+                    PendingSceneCommandTimeoutSeconds)
+                return;
+
+            CancelSceneTransition("No fue posible iniciar la escena indicada por el host.");
+        }
+
+        private static void CancelSceneTransition(string reason)
+        {
+            var wasActive = sceneTransitionActive || hasPendingRemoteScene ||
+                !string.IsNullOrEmpty(blockedClientSceneRequest);
+            // Primero se suelta cualquier pausa del gate para que Out() pueda
+            // devolver el menú y su fade a un estado consistente.
+            LevelLoadGate.Reset();
+            RestoreBlockedClientMapMenus();
+            sceneTransitionActive = false;
+            sceneTransitionId = 0;
+            sceneTransitionTarget = string.Empty;
+            sceneTransitionStartedRealtime = 0f;
+            sceneTransitionDifficulty = (byte)Level.Mode.Normal;
+            remoteSceneLoadStarted = false;
+            pendingRemoteScene = default(SceneCommand);
+            hasPendingRemoteScene = false;
+            blockedClientSceneRequest = string.Empty;
+            blockedClientSceneRequestRealtime = 0f;
+            ClearRemotePlayerState();
+            // Si seguimos en el mapa anterior, no se debe aplicar allí un snapshot
+            // retenido que pertenecía al destino cancelado.
+            mapBootstrapCompleted = Map.Current != null;
+            received = new InputFrame();
+            previousHeld = InputButtons.None;
+            if (wasActive)
+                Plugin.Log.LogWarning("[SceneSync] Transición cancelada: " + reason);
         }
 
         private static bool IsStableScene(string sceneName, LoadSceneMode mode)
@@ -1075,6 +1684,7 @@ namespace Coophead
                         (byte)Mathf.Clamp(SessionResumeSeconds, 0, 255) : (byte)0,
                     CurrentMap = hasActiveSave ? (int)data.CurrentMap : -1,
                     CurrentLevel = Level.Current == null ? -1 : (int)Level.Current.CurrentLevel,
+                    LoadTransitionId = LevelLoadGate.TransitionId,
                 };
 
                 if (!force && hasLastSentContext && ContextEquals(context, lastSentContext) &&
@@ -1086,6 +1696,7 @@ namespace Coophead
                 Plugin.Log.LogInfo("[SessionSync] Contexto enviado: slot=" + context.SaveSlot +
                     " mugman=" + context.PlayerOneIsMugman + " difficulty=" + context.Difficulty +
                     " map=" + context.CurrentMap + " level=" + context.CurrentLevel +
+                    " transition=" + context.LoadTransitionId +
                     " suspended=" + context.SessionSuspended + " resume=" +
                     context.ResumeSeconds);
             }
@@ -1109,12 +1720,14 @@ namespace Coophead
                     ": slot=" + context.SaveSlot + " mugman=" + context.PlayerOneIsMugman +
                     " difficulty=" + context.Difficulty + " map=" + context.CurrentMap +
                     " level=" + context.CurrentLevel + " suspended=" +
-                    context.SessionSuspended + " resume=" + context.ResumeSeconds);
+                    context.SessionSuspended + " transition=" + context.LoadTransitionId +
+                    " resume=" + context.ResumeSeconds);
                 if (context.SaveSlot > 2 || context.Difficulty > 2)
                     continue;
                 ApplyClientSessionHold(context);
                 if (context.LevelGateReleased)
-                    LevelLoadGate.OnHostRelease(context.CurrentLevel);
+                    LevelLoadGate.OnHostRelease(context.CurrentLevel,
+                        context.LoadTransitionId);
                 if (!context.HasSave)
                 {
                     hasRemoteContext = false;
@@ -1128,7 +1741,9 @@ namespace Coophead
                     PlayerData.CurrentSaveFileIndex = context.SaveSlot;
                     PlayerManager.player1IsMugman = context.PlayerOneIsMugman;
                     data.isPlayer1Mugman = context.PlayerOneIsMugman;
-                    Level.SetCurrentMode((Level.Mode)context.Difficulty);
+                    if (!LevelLoadGate.IsActive ||
+                        context.LoadTransitionId == LevelLoadGate.TransitionId)
+                        Level.SetCurrentMode((Level.Mode)context.Difficulty);
                     if (context.CurrentMap >= 0 &&
                         System.Enum.IsDefined(typeof(Scenes), context.CurrentMap))
                         data.CurrentMap = (Scenes)context.CurrentMap;
@@ -1236,7 +1851,8 @@ namespace Coophead
                 left.Difficulty == right.Difficulty &&
                 left.ResumeSeconds == right.ResumeSeconds &&
                 left.CurrentMap == right.CurrentMap &&
-                left.CurrentLevel == right.CurrentLevel;
+                left.CurrentLevel == right.CurrentLevel &&
+                left.LoadTransitionId == right.LoadTransitionId;
         }
 
         private static void CaptureAndSendPlayerState()
@@ -1244,7 +1860,22 @@ namespace Coophead
             if (!transport.IsConnected)
                 return;
 
-            var state = new PlayerStateSnapshot { Tick = sourceTick };
+            var state = new PlayerStateSnapshot
+            {
+                Tick = sourceTick,
+                TransitionId = sceneTransitionActive &&
+                    SceneManager.GetActiveScene().name == sceneTransitionTarget ?
+                    sceneTransitionId : 0,
+                PlayerOneMapHorizontal = hostPlayerOneInput.Horizontal,
+                PlayerOneMapVertical = hostPlayerOneInput.Vertical,
+                PlayerOneHeld = hostPlayerOneInput.Held,
+                PlayerOnePressed = hostPlayerOneInput.Pressed,
+                PlayerOneReleased = hostPlayerOneInput.Released,
+                PlayerOneSuperActionSequence =
+                    hostPlayerOneSuperActionSequence,
+            };
+            if (Level.Current != null && Level.Current.Started)
+                state.Flags |= PlayerStateFlags.GameplayStarted;
             if (Map.Current != null)
             {
                 CaptureMapPlayer(PlayerId.PlayerOne, 1, ref state);
@@ -1265,6 +1896,40 @@ namespace Coophead
                         state.PresentMask + ").");
                 }
             }
+            hostPlayerOneInput.Pressed = InputButtons.None;
+            hostPlayerOneInput.Released = InputButtons.None;
+        }
+
+        private static void CaptureHostPlayerOneInput()
+        {
+            if (!transport.IsConnected)
+            {
+                hostPlayerOneInput = new InputFrame { Tick = sourceTick };
+                previousHostPlayerOneHeld = InputButtons.None;
+                return;
+            }
+
+            samplingLocalInput = true;
+            try
+            {
+                var sampled = new InputFrame { Tick = sourceTick };
+                MergeConfiguredPlayer(PlayerId.PlayerOne, ref sampled);
+                MergeInput(ref sampled, SampleUnityFallbackInput());
+                if (IsGameplayInputLocked())
+                {
+                    previousHostPlayerOneHeld = sampled.Held;
+                    hostPlayerOneInput = new InputFrame { Tick = sourceTick };
+                    return;
+                }
+                sampled.Pressed |= sampled.Held & ~previousHostPlayerOneHeld;
+                sampled.Released |= previousHostPlayerOneHeld & ~sampled.Held;
+                previousHostPlayerOneHeld = sampled.Held;
+                hostPlayerOneInput = sampled;
+            }
+            finally
+            {
+                samplingLocalInput = false;
+            }
         }
 
         private static void CaptureMapPlayer(PlayerId id, byte mask,
@@ -1277,30 +1942,13 @@ namespace Coophead
             state.PresentMask |= mask;
             var position = players[index].transform.position;
             SetSnapshotPosition(id, position, 0, ref state);
-            if (id == PlayerId.PlayerOne)
+            if (id == PlayerId.PlayerOne && !hostMapAxesReported &&
+                (state.PlayerOneMapHorizontal != 0 || state.PlayerOneMapVertical != 0))
             {
-                try
-                {
-                    var input = PlayerManager.GetPlayerInput(PlayerId.PlayerOne);
-                    if (input != null)
-                    {
-                        state.PlayerOneMapHorizontal = QuantizeAxis(input.GetAxisRaw(0));
-                        state.PlayerOneMapVertical = QuantizeAxis(input.GetAxisRaw(1));
-                        if (!hostMapAxesReported &&
-                            (state.PlayerOneMapHorizontal != 0 ||
-                            state.PlayerOneMapVertical != 0))
-                        {
-                            hostMapAxesReported = true;
-                            Plugin.Log.LogMessage("[StateSync] El host transmite movimiento " +
-                                "del mapa H=" + state.PlayerOneMapHorizontal + " V=" +
-                                state.PlayerOneMapVertical + ".");
-                        }
-                    }
-                }
-                catch
-                {
-                    // El snapshot de posición sigue siendo válido aunque falte Rewired.
-                }
+                hostMapAxesReported = true;
+                Plugin.Log.LogMessage("[StateSync] El host transmite movimiento " +
+                    "del mapa H=" + state.PlayerOneMapHorizontal + " V=" +
+                    state.PlayerOneMapVertical + ".");
             }
         }
 
@@ -1318,6 +1966,51 @@ namespace Coophead
             var position = player.transform.position;
             var health = player.stats == null ? 0 : player.stats.Health;
             SetSnapshotPosition(id, position, health, ref state);
+            if (player.stats != null)
+            {
+                if (id == PlayerId.PlayerOne)
+                    state.PlayerOneSuperMeter = player.stats.SuperMeter;
+                else
+                    state.PlayerTwoSuperMeter = player.stats.SuperMeter;
+            }
+
+            var levelPlayer = player as LevelPlayerController;
+            var motor = levelPlayer == null ? null : levelPlayer.motor;
+            if (motor == null)
+                return;
+            var motionFlags = PlayerMotionFlags.None;
+            if (motor.Dashing)
+                motionFlags |= PlayerMotionFlags.Dashing;
+            if (motor.IsHit)
+                motionFlags |= PlayerMotionFlags.Hit;
+            if (motor.IsUsingSuperOrEx)
+                motionFlags |= PlayerMotionFlags.UsingSuperOrEx;
+            if (id == PlayerId.PlayerOne)
+                state.PlayerOneMotionFlags = motionFlags;
+            else
+            {
+                state.PlayerTwoMotionFlags = motionFlags;
+                state.PlayerTwoHitDirection = CaptureHitDirection(motor);
+            }
+        }
+
+        private static sbyte CaptureHitDirection(LevelPlayerMotor motor)
+        {
+            if (motor == null || LevelPlayerMotorHitManagerField == null ||
+                LevelPlayerMotorHitDirectionField == null)
+                return 0;
+            try
+            {
+                var hitManager = LevelPlayerMotorHitManagerField.GetValue(motor);
+                if (hitManager == null)
+                    return 0;
+                return (sbyte)Mathf.Clamp((int)
+                    LevelPlayerMotorHitDirectionField.GetValue(hitManager), -1, 1);
+            }
+            catch
+            {
+                return 0;
+            }
         }
 
         private static void SetSnapshotPosition(PlayerId id, Vector3 position, int health,
@@ -1345,9 +2038,40 @@ namespace Coophead
                 if (hasRemotePlayerStateTick &&
                     !IsNewerTick(state.Tick, lastRemotePlayerStateTick))
                     continue;
+                if (sceneTransitionActive && state.TransitionId != sceneTransitionId)
+                    continue;
                 latestRemotePlayerState = state;
+                latestRemotePlayerStateScene = SceneManager.GetActiveScene().name;
+                var pressed = state.PlayerOnePressed |
+                    (state.PlayerOneHeld & ~previousRemotePlayerOneHeld);
+                var released = state.PlayerOneReleased |
+                    (previousRemotePlayerOneHeld & ~state.PlayerOneHeld);
+                // EX/Super se reproduce sólo cuando el host confirma que el juego
+                // consumió una carta. La secuencia persiste en snapshots posteriores,
+                // por lo que un tap corto no depende de que llegue un datagrama exacto.
+                pressed &= ~InputButtons.Super;
+                if (state.PlayerOneSuperActionSequence != 0 &&
+                    (!hasRemotePlayerOneSuperActionSequence ||
+                        IsNewerTick(state.PlayerOneSuperActionSequence,
+                            lastRemotePlayerOneSuperActionSequence)))
+                {
+                    lastRemotePlayerOneSuperActionSequence =
+                        state.PlayerOneSuperActionSequence;
+                    hasRemotePlayerOneSuperActionSequence = true;
+                    pressed |= InputButtons.Super;
+                    remotePlayerOneSuperDeferralDeadline =
+                        Time.realtimeSinceStartup +
+                        RemotePlayerOneSuperDeferralSeconds;
+                }
+                previousRemotePlayerOneHeld = state.PlayerOneHeld;
+                remotePlayerOneInput.Tick = state.Tick;
+                remotePlayerOneInput.Horizontal = state.PlayerOneMapHorizontal;
+                remotePlayerOneInput.Vertical = state.PlayerOneMapVertical;
+                remotePlayerOneInput.Held = state.PlayerOneHeld;
+                remotePlayerOneInput.Pressed |= pressed;
+                remotePlayerOneInput.Released |= released;
+                QueueRemotePlayerOneFixedEdges(pressed, released);
                 hasRemotePlayerState = true;
-                remotePlayerStatePendingApply = true;
                 lastRemotePlayerStateRealtime = Time.realtimeSinceStartup;
                 lastRemotePlayerStateTick = state.Tick;
                 hasRemotePlayerStateTick = true;
@@ -1372,38 +2096,286 @@ namespace Coophead
         private static void ApplyRemotePlayerState()
         {
             if (!IsClient || !transport.IsConnected || !hasRemotePlayerState ||
-                !remotePlayerStatePendingApply)
+                SessionOverlayVisible || latestRemotePlayerStateScene !=
+                    SceneManager.GetActiveScene().name ||
+                Time.realtimeSinceStartup - lastRemotePlayerStateRealtime > 0.5f)
                 return;
 
-            remotePlayerStatePendingApply = false;
+            if (Map.Current != null && !mapBootstrapCompleted)
+            {
+                TryBootstrapClientMapFromHost();
+                if (!mapBootstrapCompleted)
+                    return;
+            }
+
+            if (SceneTransitionActive)
+                return;
+
+            var onLevel = Level.Current != null;
+            if (onLevel && (!Level.Current.Started ||
+                (latestRemotePlayerState.Flags & PlayerStateFlags.GameplayStarted) == 0))
+                return;
 
             if ((latestRemotePlayerState.PresentMask & 1) != 0)
+            {
+                var firstLevelCorrection = onLevel &&
+                    !levelPlayerOneBootstrapCompleted;
                 CorrectPlayerPosition(PlayerId.PlayerOne,
-                    latestRemotePlayerState.PlayerOneX, latestRemotePlayerState.PlayerOneY, true);
+                    latestRemotePlayerState.PlayerOneX, latestRemotePlayerState.PlayerOneY,
+                    firstLevelCorrection);
+                if (firstLevelCorrection)
+                {
+                    levelPlayerOneBootstrapCompleted = true;
+                    Plugin.Log.LogMessage("[StateSync] Player One remoto alineado al iniciar " +
+                        "el combate.");
+                }
+            }
             if ((latestRemotePlayerState.PresentMask & 2) != 0)
-                CorrectPredictedPlayerTwoPosition(
-                    latestRemotePlayerState.PlayerTwoX,
-                    latestRemotePlayerState.PlayerTwoY);
+            {
+                // P2 pertenece al invitado y se simula localmente. El snapshot del
+                // host ya recorrió cliente -> host -> cliente, así que usarlo como
+                // corrección continua rebobina cada dash aproximadamente un RTT.
+                // Sólo se usa para colocar al actor una vez al abrir el nivel; la
+                // reconciliación continua futura necesitará ACK + replay de inputs.
+                var firstLevelCorrection = onLevel &&
+                    !levelPlayerTwoBootstrapCompleted;
+                if (firstLevelCorrection)
+                {
+                    CorrectPlayerPosition(PlayerId.PlayerTwo,
+                        latestRemotePlayerState.PlayerTwoX,
+                        latestRemotePlayerState.PlayerTwoY, true);
+                    levelPlayerTwoBootstrapCompleted = true;
+                    ResetPlayerTwoStallFallback();
+                }
+                UpdatePlayerTwoStallFallback();
+                if (!p2PredictionIsolationReported)
+                {
+                    p2PredictionIsolationReported = true;
+                    Plugin.Log.LogInfo("[StateSync] P2 queda bajo predicción local; " +
+                        "el host sólo interviene si detectamos que quedó inmóvil.");
+                }
+            }
+
+            SlimeBossSynchronizer.ApplyAuthoritativePlayerState(
+                latestRemotePlayerState);
         }
 
         private static void ClearRemotePlayerState()
         {
             latestRemotePlayerState = default(PlayerStateSnapshot);
+            latestRemotePlayerStateScene = string.Empty;
+            remotePlayerOneInput = new InputFrame();
+            previousRemotePlayerOneHeld = InputButtons.None;
+            remotePlayerOnePendingPressed = InputButtons.None;
+            remotePlayerOnePendingReleased = InputButtons.None;
+            remotePlayerOneFixedPressed = InputButtons.None;
+            remotePlayerOneFixedReleased = InputButtons.None;
             hasRemotePlayerState = false;
-            remotePlayerStatePendingApply = false;
             lastRemotePlayerStateRealtime = 0f;
+            remotePlayerOneSuperDeferralDeadline = 0f;
+            ResetPlayerTwoStallFallback();
         }
 
         private static void ResetRemotePlayerState()
         {
             ClearRemotePlayerState();
+            SlimeBossSynchronizer.Reset();
             lastRemotePlayerStateTick = 0;
             hasRemotePlayerStateTick = false;
+            mapBootstrapCompleted = false;
+            levelPlayerOneBootstrapCompleted = false;
+            levelPlayerTwoBootstrapCompleted = false;
+        }
+
+        private static void TryBootstrapClientMapFromHost()
+        {
+            if (mapBootstrapCompleted || Map.Current == null ||
+                (latestRemotePlayerState.PresentMask & 3) != 3)
+                return;
+            if (sceneTransitionActive &&
+                SceneManager.GetActiveScene().name != sceneTransitionTarget)
+                return;
+            var expectedTransitionId = LevelLoadGate.TransitionId;
+            if (expectedTransitionId != 0 &&
+                latestRemotePlayerState.TransitionId != expectedTransitionId)
+                return;
+
+            var players = Map.Current.players;
+            if (players == null || players.Length < 2 ||
+                players[0] == null || players[1] == null)
+                return;
+
+            var playerOnePosition = new Vector3(latestRemotePlayerState.PlayerOneX,
+                latestRemotePlayerState.PlayerOneY, players[0].transform.position.z);
+            var playerTwoPosition = new Vector3(latestRemotePlayerState.PlayerTwoX,
+                latestRemotePlayerState.PlayerTwoY, players[1].transform.position.z);
+            AlignMapPlayer(players[0], playerOnePosition);
+            AlignMapPlayer(players[1], playerTwoPosition);
+
+            try
+            {
+                if (PlayerData.Data != null)
+                {
+                    PlayerData.Data.CurrentMapData.playerOnePosition = playerOnePosition;
+                    PlayerData.Data.CurrentMapData.playerTwoPosition = playerTwoPosition;
+                }
+            }
+            catch { }
+
+            if (CupheadMapCamera.Current != null)
+            {
+                var cameraPosition = CupheadMapCamera.Current.transform.position;
+                cameraPosition.x = (playerOnePosition.x + playerTwoPosition.x) * 0.5f;
+                cameraPosition.y = (playerOnePosition.y + playerTwoPosition.y) * 0.5f;
+                CupheadMapCamera.Current.transform.position = cameraPosition;
+            }
+
+            mapBootstrapCompleted = true;
+            Plugin.Log.LogMessage("[StateSync] Mapa del invitado alineado con el host " +
+                "antes de abrir la carga.");
+        }
+
+        private static void AlignMapPlayer(MapPlayerController player, Vector3 position)
+        {
+            player.transform.position = position;
+            if (player.motor != null && MapPlayerMotorVelocityField != null)
+                MapPlayerMotorVelocityField.SetValue(player.motor, Vector2.zero);
+            var body = player.GetComponent<Rigidbody2D>();
+            if (body != null)
+                body.velocity = Vector2.zero;
         }
 
         private static bool IsNewerTick(uint candidate, uint current)
         {
             return candidate != current && unchecked((int)(candidate - current)) > 0;
+        }
+
+        private static void UpdatePlayerTwoStallFallback()
+        {
+            if (Map.Current != null || Level.Current == null ||
+                !Level.Current.Started ||
+                (latestRemotePlayerState.PresentMask & 2) == 0 ||
+                (latestRemotePlayerState.DeadMask & 2) != 0)
+            {
+                ResetPlayerTwoStallFallback();
+                return;
+            }
+
+            AbstractPlayerController player;
+            try { player = PlayerManager.GetPlayer(PlayerId.PlayerTwo); }
+            catch { return; }
+            if (player == null)
+                return;
+
+            var localPosition = (Vector2)player.transform.position;
+            var hostPosition = new Vector2(
+                latestRemotePlayerState.PlayerTwoX,
+                latestRemotePlayerState.PlayerTwoY);
+            if (playerTwoHostFallbackActive)
+                return;
+
+            var movementRequested = Mathf.Abs(received.Horizontal) >= 32 ||
+                Mathf.Abs(received.Vertical) >= 32 ||
+                (received.Held & (InputButtons.Jump | InputButtons.Dash)) != 0;
+            if (!movementRequested)
+            {
+                playerTwoStallProbeActive = false;
+                playerTwoStallProbeLocalDistance = 0f;
+                playerTwoStallProbeHostDistance = 0f;
+                playerTwoConsecutiveStallProbes = 0;
+                return;
+            }
+
+            var now = Time.realtimeSinceStartup;
+            if (!playerTwoStallProbeActive)
+            {
+                playerTwoStallProbeActive = true;
+                playerTwoStallProbeStartedRealtime = now;
+                playerTwoStallProbeLastLocalPosition = localPosition;
+                playerTwoStallProbeLastHostPosition = hostPosition;
+                playerTwoStallProbeLocalDistance = 0f;
+                playerTwoStallProbeHostDistance = 0f;
+                return;
+            }
+
+            playerTwoStallProbeLocalDistance += Vector2.Distance(
+                playerTwoStallProbeLastLocalPosition, localPosition);
+            playerTwoStallProbeHostDistance += Vector2.Distance(
+                playerTwoStallProbeLastHostPosition, hostPosition);
+            playerTwoStallProbeLastLocalPosition = localPosition;
+            playerTwoStallProbeLastHostPosition = hostPosition;
+            if (now - playerTwoStallProbeStartedRealtime <
+                PlayerTwoStallProbeSeconds)
+                return;
+
+            if (playerTwoStallProbeLocalDistance <
+                    PlayerTwoLocalMovementThreshold &&
+                playerTwoStallProbeHostDistance >
+                    PlayerTwoHostMovementThreshold)
+            {
+                playerTwoConsecutiveStallProbes++;
+                if (playerTwoConsecutiveStallProbes >= 2)
+                {
+                    playerTwoHostFallbackActive = true;
+                    Plugin.Log.LogWarning("[StateSync] P2 no avanzó localmente " +
+                        "durante dos comprobaciones aunque el host sí lo movió; " +
+                        "se activa seguimiento de rescate hasta cambiar de escena.");
+                    return;
+                }
+            }
+            else
+            {
+                playerTwoConsecutiveStallProbes = 0;
+            }
+
+            playerTwoStallProbeStartedRealtime = now;
+            playerTwoStallProbeLocalDistance = 0f;
+            playerTwoStallProbeHostDistance = 0f;
+        }
+
+        private static void ApplyPlayerTwoHostFallback()
+        {
+            if (!playerTwoHostFallbackActive || !IsClient ||
+                SessionOverlayVisible || SceneTransitionActive ||
+                !hasRemotePlayerState || Level.Current == null ||
+                !Level.Current.Started || latestRemotePlayerStateScene !=
+                    SceneManager.GetActiveScene().name ||
+                Time.realtimeSinceStartup - lastRemotePlayerStateRealtime > 0.5f)
+                return;
+
+            AbstractPlayerController player;
+            try { player = PlayerManager.GetPlayer(PlayerId.PlayerTwo); }
+            catch { return; }
+            if (player == null)
+                return;
+            FollowPlayerTwoFromHost(player.transform, new Vector2(
+                latestRemotePlayerState.PlayerTwoX,
+                latestRemotePlayerState.PlayerTwoY));
+        }
+
+        private static void FollowPlayerTwoFromHost(Transform playerTransform,
+            Vector2 hostPosition)
+        {
+            var current = playerTransform.position;
+            var target = new Vector3(hostPosition.x, hostPosition.y, current.z);
+            var distance = Vector2.Distance(current, target);
+            if (distance > 80f)
+                playerTransform.position = target;
+            else if (distance > 0.5f)
+                playerTransform.position = Vector3.Lerp(current, target,
+                    Mathf.Clamp01(Time.unscaledDeltaTime * 18f));
+        }
+
+        private static void ResetPlayerTwoStallFallback()
+        {
+            playerTwoStallProbeActive = false;
+            playerTwoHostFallbackActive = false;
+            playerTwoStallProbeStartedRealtime = 0f;
+            playerTwoStallProbeLastLocalPosition = Vector2.zero;
+            playerTwoStallProbeLastHostPosition = Vector2.zero;
+            playerTwoStallProbeLocalDistance = 0f;
+            playerTwoStallProbeHostDistance = 0f;
+            playerTwoConsecutiveStallProbes = 0;
         }
 
         private static void CorrectPlayerPosition(PlayerId id, float x, float y, bool authoritative)
@@ -1433,10 +2405,15 @@ namespace Coophead
             var current = playerTransform.position;
             var target = new Vector3(x, y, current.z);
             var distance = Vector2.Distance(current, target);
+            var hostActivelyMoving = remotePlayerOneInput.Horizontal != 0 ||
+                remotePlayerOneInput.Vertical != 0 ||
+                (remotePlayerOneInput.Held &
+                    (InputButtons.Jump | InputButtons.Dash)) != 0;
             if (authoritative || distance > 80f)
                 playerTransform.position = target;
-            else if (distance > 1f)
-                playerTransform.position = Vector3.Lerp(current, target, 0.2f);
+            else if (!hostActivelyMoving && distance > 3f)
+                playerTransform.position = Vector3.Lerp(current, target,
+                    Mathf.Clamp01(Time.unscaledDeltaTime * 8f));
         }
 
         private static void CorrectMapTransform(Transform playerTransform, float x, float y)
@@ -1444,48 +2421,13 @@ namespace Coophead
             var current = playerTransform.position;
             var target = new Vector3(x, y, current.z);
             var distance = Vector2.Distance(current, target);
-            if (distance > 4f)
+            var hostMoving = latestRemotePlayerState.PlayerOneMapHorizontal != 0 ||
+                latestRemotePlayerState.PlayerOneMapVertical != 0;
+            if (distance > 20f)
                 playerTransform.position = target;
-            else if (distance > 0.05f)
-                playerTransform.position = Vector3.Lerp(current, target, 0.35f);
-        }
-
-        private static void CorrectPredictedPlayerTwoPosition(float x, float y)
-        {
-            Transform playerTransform;
-            var onMap = Map.Current != null;
-            if (onMap)
-            {
-                var players = Map.Current.players;
-                if (players == null || players.Length < 2 || players[1] == null)
-                    return;
-                playerTransform = players[1].transform;
-            }
-            else
-            {
-                AbstractPlayerController player;
-                try { player = PlayerManager.GetPlayer(PlayerId.PlayerTwo); }
-                catch { return; }
-                if (player == null)
-                    return;
-                playerTransform = player.transform;
-            }
-
-            var current = playerTransform.position;
-            var target = new Vector3(x, y, current.z);
-            var distance = Vector2.Distance(current, target);
-            var activelyPredicting = received.Horizontal != 0 || received.Vertical != 0 ||
-                received.Held != InputButtons.None;
-            var snapDistance = onMap ? 12f : 80f;
-            var idleCorrectionDistance = onMap ? 1f : 3f;
-
-            // Mientras el invitado controla a P2, una corrección suave basada en un
-            // snapshot atrasado lo arrastra hacia atrás y reduce su velocidad aparente.
-            // Solo aceptamos un salto autoritativo grande; al quedar neutral convergemos.
-            if (distance >= snapDistance)
-                playerTransform.position = target;
-            else if (!activelyPredicting && distance >= idleCorrectionDistance)
-                playerTransform.position = Vector3.Lerp(current, target, 0.15f);
+            else if (!hostMoving && distance > 0.5f)
+                playerTransform.position = Vector3.Lerp(current, target,
+                    Mathf.Clamp01(Time.unscaledDeltaTime * 6f));
         }
 
         private static void ReportPlayerTwoWhenReady()
@@ -1507,7 +2449,10 @@ namespace Coophead
             }
         }
 
-        public static float GetAxis(int actionId) => received.GetAxis(actionId);
+        public static float GetAxis(int actionId)
+        {
+            return IsGameplayInputLocked() ? 0f : received.GetAxis(actionId);
+        }
 
         public static void ReportRewiredRead()
         {
@@ -1520,15 +2465,85 @@ namespace Coophead
 
         public static bool GetButton(int actionId, ButtonPhase phase)
         {
+            if (IsGameplayInputLocked())
+                return false;
             var button = MapButton(actionId);
             if (button == InputButtons.None)
                 return false;
 
             if (phase == ButtonPhase.Pressed)
-                return received.HasPressed(button);
+            {
+                var edges = (FixedGameplayButtons & button) != 0 ?
+                    playerTwoFixedPressed : received.Pressed;
+                return (edges & button) != 0;
+            }
             if (phase == ButtonPhase.Released)
-                return received.HasReleased(button);
+            {
+                var edges = (FixedGameplayButtons & button) != 0 ?
+                    playerTwoFixedReleased : received.Released;
+                return (edges & button) != 0;
+            }
             return received.HasHeld(button);
+        }
+
+        public static float GetButtonTimePressed(int actionId)
+        {
+            return GetButton(actionId, ButtonPhase.Held) ?
+                Mathf.Max(Time.fixedDeltaTime, 0.001f) : 0f;
+        }
+
+        private static bool IsGameplayInputLocked()
+        {
+            return sessionHoldState != SessionHoldState.None || SceneTransitionActive ||
+                LevelLoadGate.IsHoldingGameplay || IsLevelIntroActive();
+        }
+
+        private static bool IsLevelIntroActive()
+        {
+            return Level.Current != null && !Level.Current.Started;
+        }
+
+        private static void QueuePlayerTwoFixedEdges(InputButtons pressed,
+            InputButtons released)
+        {
+            playerTwoPendingPressed |= pressed & FixedGameplayButtons;
+            playerTwoPendingReleased |= released & FixedGameplayButtons;
+        }
+
+        private static void QueueRemotePlayerOneFixedEdges(InputButtons pressed,
+            InputButtons released)
+        {
+            remotePlayerOnePendingPressed |= pressed & FixedGameplayButtons;
+            remotePlayerOnePendingReleased |= released & FixedGameplayButtons;
+        }
+
+        private static void ResetInputEdgeLatches()
+        {
+            playerTwoPendingPressed = InputButtons.None;
+            playerTwoPendingReleased = InputButtons.None;
+            playerTwoFixedPressed = InputButtons.None;
+            playerTwoFixedReleased = InputButtons.None;
+            remotePlayerOnePendingPressed = InputButtons.None;
+            remotePlayerOnePendingReleased = InputButtons.None;
+            remotePlayerOneFixedPressed = InputButtons.None;
+            remotePlayerOneFixedReleased = InputButtons.None;
+        }
+
+        private static void ReportPlayerTwoCombatButtons(string source, InputFrame frame)
+        {
+            if (!superButtonReported &&
+                ((frame.Held | frame.Pressed) & InputButtons.Super) != 0)
+            {
+                superButtonReported = true;
+                Plugin.Log.LogMessage("[InputSync] P2 " + source +
+                    " el botón EX/Super.");
+            }
+            if (!lockButtonReported && (frame.Held & InputButtons.Lock) != 0)
+            {
+                lockButtonReported = true;
+                Plugin.Log.LogMessage("[InputSync] P2 " + source +
+                    " el botón de fijar.");
+            }
         }
 
         private static InputFrame SampleConfiguredPlayerInput()
@@ -1560,6 +2575,8 @@ namespace Coophead
                     Horizontal = QuantizeAxis(player.GetAxisRaw(0)),
                     Vertical = QuantizeAxis(player.GetAxisRaw(1)),
                     Held = ReadConfiguredButtons(player),
+                    Pressed = ReadConfiguredButtonEdges(player, true),
+                    Released = ReadConfiguredButtonEdges(player, false),
                 });
             }
             catch
@@ -1575,6 +2592,8 @@ namespace Coophead
             if (Mathf.Abs(candidate.Vertical) > Mathf.Abs(target.Vertical))
                 target.Vertical = candidate.Vertical;
             target.Held |= candidate.Held;
+            target.Pressed |= candidate.Pressed;
+            target.Released |= candidate.Released;
         }
 
         private static InputFrame SampleUnityFallbackInput()
@@ -1584,16 +2603,44 @@ namespace Coophead
             {
                 Horizontal = ReadAxis(KeyCode.LeftArrow, KeyCode.RightArrow),
                 Vertical = ReadAxis(KeyCode.DownArrow, KeyCode.UpArrow),
+                Held = ReadMenuDirections(KeyCode.UpArrow, KeyCode.LeftArrow,
+                    KeyCode.DownArrow, KeyCode.RightArrow),
             };
             var wasd = new InputFrame
             {
                 Horizontal = ReadAxis(KeyCode.A, KeyCode.D),
                 Vertical = ReadAxis(KeyCode.S, KeyCode.W),
+                Held = ReadMenuDirections(KeyCode.W, KeyCode.A,
+                    KeyCode.S, KeyCode.D),
             };
             MergeInput(ref sampled, arrows);
             MergeInput(ref sampled, wasd);
-            if (Input.GetKey(KeyCode.Escape))
-                sampled.Held |= InputButtons.Pause | InputButtons.Cancel;
+            AddKeyInput(ref sampled, KeyCode.Escape,
+                InputButtons.Pause | InputButtons.Cancel);
+            AddKeyInput(ref sampled, KeyCode.Z,
+                InputButtons.Jump | InputButtons.Accept);
+            AddKeyInput(ref sampled, KeyCode.Return, InputButtons.Accept);
+            AddKeyInput(ref sampled, KeyCode.X, InputButtons.Shoot);
+            AddKeyInput(ref sampled, KeyCode.V, InputButtons.Super);
+            AddKeyInput(ref sampled, KeyCode.Tab, InputButtons.SwitchWeapon);
+            AddKeyInput(ref sampled, KeyCode.C, InputButtons.Lock);
+            AddKeyInput(ref sampled, KeyCode.LeftShift,
+                InputButtons.Dash | InputButtons.EquipMenu);
+            AddKeyInput(ref sampled, KeyCode.RightShift,
+                InputButtons.Dash | InputButtons.EquipMenu);
+
+            // Respaldo para mandos XInput que Unity ve, pero Rewired todavía no
+            // asignó a uno de los dos perfiles (algo común por escritorio remoto).
+            AddKeyInput(ref sampled, KeyCode.JoystickButton0,
+                InputButtons.Jump | InputButtons.Accept);
+            AddKeyInput(ref sampled, KeyCode.JoystickButton1,
+                InputButtons.Super | InputButtons.Cancel);
+            AddKeyInput(ref sampled, KeyCode.JoystickButton2, InputButtons.Shoot);
+            AddKeyInput(ref sampled, KeyCode.JoystickButton3, InputButtons.Dash);
+            AddKeyInput(ref sampled, KeyCode.JoystickButton4,
+                InputButtons.SwitchWeapon);
+            AddKeyInput(ref sampled, KeyCode.JoystickButton5, InputButtons.Lock);
+            AddKeyInput(ref sampled, KeyCode.JoystickButton7, InputButtons.Pause);
             try
             {
                 MergeInput(ref sampled, new InputFrame
@@ -1656,6 +2703,10 @@ namespace Coophead
             AddIfHeld(ref buttons, player, 13, InputButtons.Accept);
             AddIfHeld(ref buttons, player, 14, InputButtons.Cancel);
             AddIfHeld(ref buttons, player, 15, InputButtons.EquipMenu);
+            AddIfHeld(ref buttons, player, 16, InputButtons.MenuUp);
+            AddIfHeld(ref buttons, player, 18, InputButtons.MenuLeft);
+            AddIfHeld(ref buttons, player, 19, InputButtons.MenuDown);
+            AddIfHeld(ref buttons, player, 20, InputButtons.MenuRight);
             AddIfHeld(ref buttons, player, 26, InputButtons.Swap);
             return buttons;
         }
@@ -1675,6 +2726,45 @@ namespace Coophead
             if (Input.GetKey(positive))
                 value++;
             return (sbyte)(value * 127);
+        }
+
+        private static InputButtons ReadMenuDirections(KeyCode up, KeyCode left,
+            KeyCode down, KeyCode right)
+        {
+            var buttons = InputButtons.None;
+            AddIfHeld(ref buttons, up, InputButtons.MenuUp);
+            AddIfHeld(ref buttons, left, InputButtons.MenuLeft);
+            AddIfHeld(ref buttons, down, InputButtons.MenuDown);
+            AddIfHeld(ref buttons, right, InputButtons.MenuRight);
+            return buttons;
+        }
+
+        private static InputButtons ReadConfiguredButtonEdges(Player player, bool pressed)
+        {
+            var buttons = InputButtons.None;
+            AddIfEdge(ref buttons, player, 2, InputButtons.Jump, pressed);
+            AddIfEdge(ref buttons, player, 3, InputButtons.Shoot, pressed);
+            AddIfEdge(ref buttons, player, 4, InputButtons.Super, pressed);
+            AddIfEdge(ref buttons, player, 5, InputButtons.SwitchWeapon, pressed);
+            AddIfEdge(ref buttons, player, 6, InputButtons.Lock, pressed);
+            AddIfEdge(ref buttons, player, 7, InputButtons.Dash, pressed);
+            AddIfEdge(ref buttons, player, 8, InputButtons.Pause, pressed);
+            AddIfEdge(ref buttons, player, 13, InputButtons.Accept, pressed);
+            AddIfEdge(ref buttons, player, 14, InputButtons.Cancel, pressed);
+            AddIfEdge(ref buttons, player, 15, InputButtons.EquipMenu, pressed);
+            AddIfEdge(ref buttons, player, 16, InputButtons.MenuUp, pressed);
+            AddIfEdge(ref buttons, player, 18, InputButtons.MenuLeft, pressed);
+            AddIfEdge(ref buttons, player, 19, InputButtons.MenuDown, pressed);
+            AddIfEdge(ref buttons, player, 20, InputButtons.MenuRight, pressed);
+            AddIfEdge(ref buttons, player, 26, InputButtons.Swap, pressed);
+            return buttons;
+        }
+
+        private static void AddIfEdge(ref InputButtons buttons, Player player,
+            int actionId, InputButtons button, bool pressed)
+        {
+            if (pressed ? player.GetButtonDown(actionId) : player.GetButtonUp(actionId))
+                buttons |= button;
         }
 
         private static InputButtons ReadLabButtons()
@@ -1697,6 +2787,17 @@ namespace Coophead
                 buttons |= button;
         }
 
+        private static void AddKeyInput(ref InputFrame frame, KeyCode key,
+            InputButtons buttons)
+        {
+            if (Input.GetKey(key))
+                frame.Held |= buttons;
+            if (Input.GetKeyDown(key))
+                frame.Pressed |= buttons;
+            if (Input.GetKeyUp(key))
+                frame.Released |= buttons;
+        }
+
         private static InputButtons MapButton(int actionId)
         {
             switch (actionId)
@@ -1711,6 +2812,10 @@ namespace Coophead
                 case 13: return InputButtons.Accept;
                 case 14: return InputButtons.Cancel;
                 case 15: return InputButtons.EquipMenu;
+                case 16: return InputButtons.MenuUp;
+                case 18: return InputButtons.MenuLeft;
+                case 19: return InputButtons.MenuDown;
+                case 20: return InputButtons.MenuRight;
                 case 26: return InputButtons.Swap;
                 default: return InputButtons.None;
             }

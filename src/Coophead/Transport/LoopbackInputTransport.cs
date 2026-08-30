@@ -8,6 +8,8 @@ namespace Coophead.Transport
         private readonly Queue<SceneCommand> scenes = new Queue<SceneCommand>();
         private readonly Queue<SessionContext> contexts = new Queue<SessionContext>();
         private readonly Queue<PlayerStateSnapshot> playerStates = new Queue<PlayerStateSnapshot>();
+        private readonly Queue<BossStateSnapshot> bossStates = new Queue<BossStateSnapshot>();
+        private uint nextSceneSequence = 1;
 
         public LoopbackInputTransport(uint latencyFrames)
         {
@@ -32,6 +34,7 @@ namespace Coophead.Transport
             scenes.Clear();
             contexts.Clear();
             playerStates.Clear();
+            bossStates.Clear();
         }
 
         public void Dispose()
@@ -39,6 +42,8 @@ namespace Coophead.Transport
             pending.Clear();
             scenes.Clear();
             contexts.Clear();
+            playerStates.Clear();
+            bossStates.Clear();
         }
 
         public void Send(InputFrame frame)
@@ -58,9 +63,12 @@ namespace Coophead.Transport
             return true;
         }
 
-        public void SendScene(SceneCommand command)
+        public uint SendScene(SceneCommand command)
         {
+            if (command.Sequence == 0)
+                command.Sequence = nextSceneSequence++;
             scenes.Enqueue(command);
+            return command.Sequence;
         }
 
         public bool TryReceiveScene(out SceneCommand command)
@@ -96,6 +104,14 @@ namespace Coophead.Transport
         {
             if (playerStates.Count == 0) { state = default(PlayerStateSnapshot); return false; }
             state = playerStates.Dequeue(); return true;
+        }
+
+        public void SendBossState(BossStateSnapshot state) { bossStates.Enqueue(state); }
+
+        public bool TryReceiveBossState(out BossStateSnapshot state)
+        {
+            if (bossStates.Count == 0) { state = default(BossStateSnapshot); return false; }
+            state = bossStates.Dequeue(); return true;
         }
 
         private struct PendingFrame

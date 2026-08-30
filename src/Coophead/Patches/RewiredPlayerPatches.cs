@@ -36,7 +36,7 @@ namespace Coophead.Patches
             }
             if (RewiredPlayerPatchGuard.ShouldOverridePlayerOneVisual(__instance))
             {
-                __result = RemoteInputLab.GetRemotePlayerOneMapAxis(actionId);
+                __result = RemoteInputLab.GetRemotePlayerOneAxis(actionId);
                 return false;
             }
             if (!RewiredPlayerPatchGuard.ShouldSuppressPlayerOne(__instance))
@@ -58,7 +58,7 @@ namespace Coophead.Patches
             }
             if (RewiredPlayerPatchGuard.ShouldOverridePlayerOneVisual(__instance))
             {
-                __result = RemoteInputLab.GetRemotePlayerOneMapAxis(actionId);
+                __result = RemoteInputLab.GetRemotePlayerOneAxis(actionId);
                 return false;
             }
             if (!RewiredPlayerPatchGuard.ShouldSuppressPlayerOne(__instance))
@@ -78,6 +78,12 @@ namespace Coophead.Patches
                 __result = RemoteInputLab.GetButton(actionId, ButtonPhase.Held);
                 return false;
             }
+            if (RewiredPlayerPatchGuard.ShouldOverridePlayerOneVisual(__instance))
+            {
+                __result = RemoteInputLab.GetRemotePlayerOneButton(actionId,
+                    ButtonPhase.Held);
+                return false;
+            }
             if (!RewiredPlayerPatchGuard.ShouldSuppressPlayerOne(__instance))
                 return true;
             __result = false;
@@ -93,6 +99,12 @@ namespace Coophead.Patches
             if (RewiredPlayerPatchGuard.ShouldOverridePlayerTwo(__instance))
             {
                 __result = RemoteInputLab.GetButton(actionId, ButtonPhase.Pressed);
+                return false;
+            }
+            if (RewiredPlayerPatchGuard.ShouldOverridePlayerOneVisual(__instance))
+            {
+                __result = RemoteInputLab.GetRemotePlayerOneButton(actionId,
+                    ButtonPhase.Pressed);
                 return false;
             }
             if (!RewiredPlayerPatchGuard.ShouldSuppressPlayerOne(__instance))
@@ -112,9 +124,37 @@ namespace Coophead.Patches
                 __result = RemoteInputLab.GetButton(actionId, ButtonPhase.Released);
                 return false;
             }
+            if (RewiredPlayerPatchGuard.ShouldOverridePlayerOneVisual(__instance))
+            {
+                __result = RemoteInputLab.GetRemotePlayerOneButton(actionId,
+                    ButtonPhase.Released);
+                return false;
+            }
             if (!RewiredPlayerPatchGuard.ShouldSuppressPlayerOne(__instance))
                 return true;
             __result = false;
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "GetButtonTimePressed", new[] { typeof(int) })]
+    internal static class RewiredPlayerGetButtonTimePressedPatch
+    {
+        private static bool Prefix(Player __instance, int actionId, ref float __result)
+        {
+            if (RewiredPlayerPatchGuard.ShouldOverridePlayerTwo(__instance))
+            {
+                __result = RemoteInputLab.GetButtonTimePressed(actionId);
+                return false;
+            }
+            if (RewiredPlayerPatchGuard.ShouldOverridePlayerOneVisual(__instance))
+            {
+                __result = RemoteInputLab.GetRemotePlayerOneButtonTimePressed(actionId);
+                return false;
+            }
+            if (!RewiredPlayerPatchGuard.ShouldSuppressPlayerOne(__instance))
+                return true;
+            __result = 0f;
             return false;
         }
     }
