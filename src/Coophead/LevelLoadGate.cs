@@ -239,6 +239,28 @@ namespace Coophead
             return active && !loaderReleased;
         }
 
+        public static void ReleaseAndResetForSupersedingTransition(
+            uint supersededTransitionId)
+        {
+            if (!active)
+                return;
+
+            var releasedTransitionId = transitionId;
+            if (supersededTransitionId != 0 &&
+                releasedTransitionId != supersededTransitionId)
+                Plugin.Log.LogWarning("[ReadyGate] El gate activo #" +
+                    releasedTransitionId + " no coincidía con la transición " +
+                    "suplantada #" + supersededTransitionId +
+                    "; se libera para evitar retener el loader anterior.");
+            else
+                Plugin.Log.LogMessage("[ReadyGate] Transición #" +
+                    releasedTransitionId + " suplantada; se libera su loader.");
+
+            // ShouldHoldLoaderExit deja de aplicar en cuanto Reset desactiva el
+            // gate. B todavía no se anuncia: primero debe terminar el loader de A.
+            Reset();
+        }
+
         public static void Reset()
         {
             var wasActive = active;

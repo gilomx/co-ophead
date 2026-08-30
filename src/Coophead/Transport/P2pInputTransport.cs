@@ -51,6 +51,15 @@ namespace Coophead.Transport
         public string Status { get { return udp == null ? asyncStatus : udp.Status; } }
         public string RoomCode { get { return asyncRoomCode; } }
         public bool IsConnected { get { return udp != null && udp.IsConnected; } }
+        public bool PeerDisconnected { get { return udp != null && udp.PeerDisconnected; } }
+        public TransportDisconnectReason PeerDisconnectReason
+        {
+            get
+            {
+                return udp == null ? TransportDisconnectReason.None :
+                    udp.PeerDisconnectReason;
+            }
+        }
         public int PingMilliseconds { get { return udp == null ? -1 : udp.PingMilliseconds; } private set { } }
         public int EstimatedPacketLossPercent
         {
@@ -114,8 +123,15 @@ namespace Coophead.Transport
             var failed = signalingRequest.isNetworkError || signalingRequest.isHttpError;
             var response = signalingRequest.downloadHandler == null ? "" : signalingRequest.downloadHandler.text;
             var error = signalingRequest.error;
+            var responseCode = signalingRequest.responseCode;
+            var networkError = signalingRequest.isNetworkError;
             signalingRequest.Dispose(); signalingRequest = null; signalingPhase = SignalingPhase.None;
-            if (failed) { asyncStatus = "P2P error: " + error; return; }
+            if (failed)
+            {
+                asyncStatus = FriendlySignalingError(response, responseCode,
+                    networkError, error);
+                return;
+            }
             if (phase == SignalingPhase.Creating)
             {
                 asyncRoomCode = MatchString(response, "code");
@@ -159,7 +175,35 @@ namespace Coophead.Transport
             return match.Success && int.TryParse(match.Groups[1].Value, out value) ? value : -1;
         }
 
+        private static string FriendlySignalingError(string response, long responseCode,
+            bool networkError, string fallback)
+        {
+            var serverError = MatchString(response ?? "", "error");
+            if (serverError.Equals("sala inexistente o expirada",
+                StringComparison.OrdinalIgnoreCase))
+                return "P2P error: No existe una sala con ese código o ya expiró.";
+            if (serverError.Equals("sala llena", StringComparison.OrdinalIgnoreCase))
+                return "P2P error: La sala ya tiene dos jugadores.";
+            if (serverError.Equals("versión incompatible",
+                StringComparison.OrdinalIgnoreCase))
+                return "P2P error: Los jugadores tienen versiones distintas de Co-ophead.";
+            if (!string.IsNullOrEmpty(serverError))
+                return "P2P error: " + serverError + ".";
+            if (networkError || responseCode <= 0)
+                return "P2P error: No se pudo contactar al servicio de conexión.";
+            if (responseCode >= 400)
+                return "P2P error: El servicio rechazó la solicitud (HTTP " +
+                    responseCode + ").";
+            return "P2P error: " + (string.IsNullOrEmpty(fallback) ?
+                "No se pudo completar la conexión." : fallback);
+        }
+
         public void Reset() { if (udp != null) udp.Reset(); }
+        public void RequestDisconnect(TransportDisconnectReason reason)
+        {
+            if (udp != null)
+                udp.RequestDisconnect(reason);
+        }
         public void Send(InputFrame frame) { if (udp != null) udp.Send(frame); }
         public bool TryReceive(uint tick, out InputFrame frame) { if (udp != null) return udp.TryReceive(tick, out frame); frame = default(InputFrame); return false; }
         public uint SendScene(SceneCommand value) { return udp == null ? 0 : udp.SendScene(value); }

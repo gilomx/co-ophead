@@ -9,7 +9,10 @@ namespace Coophead.Transport
     {
         private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(1);
         private static readonly TimeSpan ReliableRetryInterval = TimeSpan.FromMilliseconds(300);
+        private static readonly TimeSpan GoodbyeRetryInterval = TimeSpan.FromMilliseconds(100);
         private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
+        private const int GoodbyeBurstCount = 3;
+        private const int GoodbyeMaxAttempts = 6;
         private readonly Socket socket;
         private readonly bool host;
         private readonly EndPoint configuredTarget;
@@ -19,10 +22,14 @@ namespace Coophead.Transport
         private readonly Queue<SessionContext> receivedContexts = new Queue<SessionContext>();
         private readonly Queue<PlayerStateSnapshot> receivedPlayerStates = new Queue<PlayerStateSnapshot>();
         private readonly Queue<BossStateSnapshot> receivedBossStates = new Queue<BossStateSnapshot>();
+        private readonly HashSet<uint> retiredInputSessionNonces = new HashSet<uint>();
+        private readonly HashSet<uint> retiredStateSessionNonces = new HashSet<uint>();
         private readonly byte[] receiveBuffer = new byte[128];
         private EndPoint peer;
         private InputButtons lastReceivedHeld;
         private uint lastReceivedTick;
+        private uint lastReceivedInputSessionNonce;
+        private uint lastReceivedStateSessionNonce;
         private DateTime lastHelloSentUtc;
         private DateTime lastPingSentUtc;
         private DateTime lastPacketReceivedUtc;
@@ -40,6 +47,12 @@ namespace Coophead.Transport
         private uint lastReceivedBossStateTick;
         private long receivedRealtimePackets;
         private long estimatedMissingRealtimePackets;
+        private EndPoint terminalPeer;
+        private bool terminalDisconnect;
+        private bool localDisconnectPending;
+        private int goodbyeAttempts;
+        private DateTime lastGoodbyeSentUtc;
+        private TransportDisconnectReason localDisconnectReason;
 
         private UdpInputTransport(Socket socket, bool host, EndPoint target,
             string description, uint versionToken)
@@ -56,6 +69,8 @@ namespace Coophead.Transport
         public string Description { get; }
         public string Status { get; private set; }
         public bool IsConnected { get; private set; }
+        public bool PeerDisconnected { get; private set; }
+        public TransportDisconnectReason PeerDisconnectReason { get; private set; }
         public int PingMilliseconds { get; private set; }
         public int EstimatedPacketLossPercent
         {
@@ -113,6 +128,10 @@ namespace Coophead.Transport
             receivedBossStates.Clear();
             lastReceivedHeld = InputButtons.None;
             lastReceivedTick = 0;
+            lastReceivedInputSessionNonce = 0;
+            lastReceivedStateSessionNonce = 0;
+            retiredInputSessionNonces.Clear();
+            retiredStateSessionNonces.Clear();
             PingMilliseconds = -1;
             lastReceivedSceneSequence = 0;
             lastReceivedContextSequence = 0;
@@ -120,6 +139,14 @@ namespace Coophead.Transport
             lastReceivedBossStateTick = 0;
             receivedRealtimePackets = 0;
             estimatedMissingRealtimePackets = 0;
+            terminalPeer = null;
+            terminalDisconnect = false;
+            localDisconnectPending = false;
+            goodbyeAttempts = 0;
+            lastGoodbyeSentUtc = DateTime.MinValue;
+            localDisconnectReason = TransportDisconnectReason.None;
+            PeerDisconnected = false;
+            PeerDisconnectReason = TransportDisconnectReason.None;
             DrainSocket();
         }
 
@@ -127,6 +154,14 @@ namespace Coophead.Transport
         {
             var now = DateTime.UtcNow;
             ReceiveAvailable(now);
+            if (terminalDisconnect)
+                return;
+            if (localDisconnectPending)
+            {
+                UpdatePendingDisconnect(now);
+                if (terminalDisconnect)
+                    return;
+            }
             if (IsConnected && now - lastPacketReceivedUtc > Timeout)
                 Disconnect(host ? "cliente desconectado; esperando" : "timeout; buscando host");
             if (!host && !IsConnected && now - lastHelloSentUtc >= RetryInterval)
@@ -166,6 +201,31 @@ namespace Coophead.Transport
         {
             if (!host && IsConnected)
                 SendPacket(InputFramePacketCodec.Encode(frame), peer);
+        }
+
+        public void RequestDisconnect(TransportDisconnectReason reason)
+        {
+            if (terminalDisconnect || localDisconnectPending)
+                return;
+
+            localDisconnectReason = NormalizeDisconnectReason(reason);
+            if (!IsConnected || peer == null)
+            {
+                terminalDisconnect = true;
+                Disconnect("sesión cerrada");
+                return;
+            }
+
+            localDisconnectPending = true;
+            goodbyeAttempts = 0;
+            lastGoodbyeSentUtc = DateTime.UtcNow;
+            for (var i = 0; i < GoodbyeBurstCount; i++)
+            {
+                SendControl(LanControlPacketCodec.Goodbye,
+                    (uint)localDisconnectReason, peer);
+                goodbyeAttempts++;
+            }
+            Status = "cerrando sesión";
         }
 
         public bool TryReceive(uint receiverTick, out InputFrame frame)
@@ -332,17 +392,13 @@ namespace Coophead.Transport
             {
                 if (!host && IsConnected && SameEndpoint(sender, peer))
                 {
+                    if (!TryActivateStateSessionNonce(playerState.StateSessionNonce))
+                        return;
                     lastPacketReceivedUtc = now;
                     if (lastReceivedPlayerStateTick != 0 &&
                         unchecked((int)(playerState.Tick - lastReceivedPlayerStateTick)) <= 0)
                         return;
                     RecordPlayerStatePacket(playerState.Tick);
-                    while (receivedPlayerStates.Count > 0)
-                    {
-                        var skipped = receivedPlayerStates.Dequeue();
-                        LanPlayerStatePacketCodec.MergeTransientEvents(
-                            ref playerState, skipped);
-                    }
                     receivedPlayerStates.Enqueue(playerState);
                 }
                 return;
@@ -367,6 +423,8 @@ namespace Coophead.Transport
             InputFrame frame;
             if (!InputFramePacketCodec.TryDecode(packet, out frame))
                 return;
+            if (!TryActivateInputSessionNonce(frame.InputSessionNonce))
+                return;
             if (frame.Tick <= lastReceivedTick && lastReceivedTick != 0)
                 return;
             frame.Pressed |= frame.Held & ~lastReceivedHeld;
@@ -380,6 +438,34 @@ namespace Coophead.Transport
 
         private void HandleControl(byte type, uint value, EndPoint sender, DateTime now)
         {
+            if (type == LanControlPacketCodec.Goodbye &&
+                ((IsConnected && SameEndpoint(sender, peer)) ||
+                    (terminalDisconnect && SameEndpoint(sender, terminalPeer))))
+            {
+                var reason = DecodeDisconnectReason(value);
+                SendControl(LanControlPacketCodec.GoodbyeAck, (uint)reason, sender);
+                terminalPeer = sender;
+                terminalDisconnect = true;
+                localDisconnectPending = false;
+                PeerDisconnected = true;
+                PeerDisconnectReason = reason;
+                Disconnect(reason == TransportDisconnectReason.RemovePlayer ?
+                    "el otro jugador removió a Player Two" :
+                    "el otro jugador se desconectó");
+                return;
+            }
+            if (type == LanControlPacketCodec.GoodbyeAck &&
+                localDisconnectPending && SameEndpoint(sender, peer) &&
+                DecodeDisconnectReason(value) == localDisconnectReason)
+            {
+                terminalPeer = sender;
+                terminalDisconnect = true;
+                localDisconnectPending = false;
+                Disconnect("sesión cerrada");
+                return;
+            }
+            if (terminalDisconnect)
+                return;
             if (host && type == LanControlPacketCodec.Hello)
             {
                 if (value != versionToken)
@@ -448,6 +534,8 @@ namespace Coophead.Transport
             peer = null;
             lastReceivedHeld = InputButtons.None;
             lastReceivedTick = 0;
+            RetireCurrentInputSessionNonce();
+            RetireCurrentStateSessionNonce();
             receivedFrames.Clear();
             receivedScenes.Clear();
             receivedContexts.Clear();
@@ -459,6 +547,87 @@ namespace Coophead.Transport
             receivedRealtimePackets = 0;
             estimatedMissingRealtimePackets = 0;
             Status = status;
+        }
+
+        private void UpdatePendingDisconnect(DateTime now)
+        {
+            if (!localDisconnectPending || terminalDisconnect)
+                return;
+            if (goodbyeAttempts < GoodbyeMaxAttempts &&
+                now - lastGoodbyeSentUtc >= GoodbyeRetryInterval)
+            {
+                SendControl(LanControlPacketCodec.Goodbye,
+                    (uint)localDisconnectReason, peer);
+                goodbyeAttempts++;
+                lastGoodbyeSentUtc = now;
+                return;
+            }
+            if (goodbyeAttempts >= GoodbyeMaxAttempts &&
+                now - lastGoodbyeSentUtc >= GoodbyeRetryInterval)
+            {
+                terminalPeer = peer;
+                terminalDisconnect = true;
+                localDisconnectPending = false;
+                Disconnect("sesión cerrada");
+            }
+        }
+
+        private static TransportDisconnectReason DecodeDisconnectReason(uint value)
+        {
+            return value == (uint)TransportDisconnectReason.RemovePlayer ?
+                TransportDisconnectReason.RemovePlayer :
+                TransportDisconnectReason.Normal;
+        }
+
+        private static TransportDisconnectReason NormalizeDisconnectReason(
+            TransportDisconnectReason reason)
+        {
+            return reason == TransportDisconnectReason.RemovePlayer ?
+                TransportDisconnectReason.RemovePlayer :
+                TransportDisconnectReason.Normal;
+        }
+
+        private bool TryActivateInputSessionNonce(uint nonce)
+        {
+            if (nonce == 0 || nonce == lastReceivedInputSessionNonce)
+                return true;
+            if (retiredInputSessionNonces.Contains(nonce))
+                return false;
+            RetireCurrentInputSessionNonce();
+            lastReceivedInputSessionNonce = nonce;
+            lastReceivedTick = 0;
+            lastReceivedHeld = InputButtons.None;
+            receivedFrames.Clear();
+            return true;
+        }
+
+        private bool TryActivateStateSessionNonce(uint nonce)
+        {
+            if (nonce == 0 || nonce == lastReceivedStateSessionNonce)
+                return true;
+            if (retiredStateSessionNonces.Contains(nonce))
+                return false;
+            RetireCurrentStateSessionNonce();
+            lastReceivedStateSessionNonce = nonce;
+            lastReceivedPlayerStateTick = 0;
+            lastReceivedBossStateTick = 0;
+            receivedPlayerStates.Clear();
+            receivedBossStates.Clear();
+            return true;
+        }
+
+        private void RetireCurrentInputSessionNonce()
+        {
+            if (lastReceivedInputSessionNonce != 0)
+                retiredInputSessionNonces.Add(lastReceivedInputSessionNonce);
+            lastReceivedInputSessionNonce = 0;
+        }
+
+        private void RetireCurrentStateSessionNonce()
+        {
+            if (lastReceivedStateSessionNonce != 0)
+                retiredStateSessionNonces.Add(lastReceivedStateSessionNonce);
+            lastReceivedStateSessionNonce = 0;
         }
 
         private void RecordInputPacket(uint tick)

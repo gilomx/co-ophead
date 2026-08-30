@@ -37,34 +37,43 @@ LanPort = 27182
 ```
 
 3. Abre Cuphead y pulsa `F8`. El host dirigirá sus cambios de escena.
-4. Usa los controles que tengas configurados en Cuphead. Como respaldo, las flechas,
-   `WASD` o `Numpad 4/6` y `Numpad 2/8` controlan el movimiento. Los frames se
-   envían al host por UDP. En una VM, su ventana debe tener el foco y el controlador
-   debe estar conectado o capturado por el sistema invitado.
+4. Usa el teclado o mando configurado para Player One en ese Cuphead. Co-ophead lee
+   sólo ese perfil y envía acciones semánticas al host; no mezcla el perfil de Player
+   Two ni teclas fijas. En una VM, su ventana debe tener el foco y el controlador debe
+   estar conectado o capturado por el sistema invitado.
 
 ## Resultado esperado
 
-Player Two aparece en el host y responde a los controles configurados del cliente (o
-al teclado numérico de respaldo). Al cambiar de mapa o entrar a un nivel, el cliente
-carga la misma escena localmente.
+Player Two aparece en el host y responde a los controles de Player One configurados
+en el cliente. El host no necesita compartir los mismos bindings: recibe `salto`,
+`disparo`, ejes y demás acciones ya traducidas. Al cambiar de mapa o entrar a un
+nivel, el cliente carga la misma escena localmente.
 
 Co-ophead también envía un contexto fiable con el slot seleccionado, personaje
-principal, dificultad, mapa y nivel. El sender lo imprime como `contexto #N`. Un
-cliente Cuphead aplica slot, personaje y dificultad. Usa el identificador de nivel
-para cargar mediante `SceneLoader`, pero no escribe mapa, victorias ni progreso en el
-guardado local.
+principal, dificultad, mapa, nivel y los loadouts aceptados de ambos jugadores. El
+invitado anuncia primero su Player One local para usarlo como Player Two; el host no
+habilita el inicio hasta recibir arma primaria/secundaria, súper y amuleto. El sender
+lo imprime como `contexto #N`. Un cliente Cuphead aplica slot, personaje, dificultad
+y overlays temporales de equipamiento. Usa el identificador de nivel para cargar
+mediante `SceneLoader`, pero no guarda esos overlays ni escribe progreso local. Antes
+de usar un slot conserva su JSON completo en memoria, bloquea las tres rutas nativas de
+guardado y restaura ese JSON al cerrar la sesión.
 El host refresca el contexto cada cinco segundos para que un cliente reconectado lo
 reciba; el sender oculta refrescos idénticos y solo imprime cambios reales.
-Además, el host envía snapshots de posición, vida y muerte de ambos jugadores veinte
-veces por segundo. El invitado aplica Player One como estado autoritativo. Player Two
-usa predicción local mientras recibe controles y converge al snapshot cuando queda
-neutral; una diferencia grande todavía produce una corrección inmediata.
+Además, el host envía snapshots de posición, vida actual/máxima, muerte y revive de ambos jugadores
+en cada actualización de red. En el mapa, el invitado congela su física local y representa
+a los dos jugadores desde un buffer corto de estado autoritativo del host. En combate,
+Player One usa ese buffer para suavizar el movimiento remoto y Player Two conserva
+predicción local mientras recibe controles. La revive remota reutiliza una sola vez la
+transición nativa del fantasma.
 
 Ambos lados muestran RTT y pérdida estimada en la esquina superior derecha. Si dejan
-de llegar frames durante 1.25 segundos, la partida queda pausada bajo un overlay. El
-invitado avisa al host mediante el siguiente frame disponible y ambos reanudan después
-de una cuenta regresiva de tres segundos. Las entradas mantenidas durante la espera se
-neutralizan para que no se ejecuten acciones atrasadas al volver.
+de llegar frames durante tres segundos, la partida queda pausada bajo un overlay. La
+primera opción queda seleccionada y el menú acepta teclado o mando. El invitado avisa
+al host mediante el siguiente frame disponible y ambos reanudan después de una cuenta
+regresiva de tres segundos. Las entradas mantenidas durante la espera se neutralizan
+para que no se ejecuten acciones atrasadas al volver. Una salida voluntaria usa una
+despedida explícita y no espera este timeout ni intenta reconectar automáticamente.
 
 Los niveles usan además una compuerta de carga. La coroutine original de `SceneLoader`
 se retiene después de `UnloadUnusedAssets` y antes de ocultar el reloj de arena. El
@@ -80,15 +89,14 @@ hay una cuenta regresiva visible.
   liberaciones perdidas. Hay una estimación de pérdida basada en saltos de tick, pero
   todavía no existe un jitter buffer adaptativo.
 - El puerto no debe exponerse directamente a Internet.
-- Hay ping periódico y timeout de quince segundos para tolerar cargas de escena; una desconexión vuelve al estado de
-  espera/búsqueda sin reiniciar el juego.
+- Hay ping periódico y timeout de quince segundos para tolerar cargas de escena. Un
+  microcorte entra en espera; una desconexión voluntaria se distingue y se resuelve de
+  inmediato.
 - El sender de desarrollo resume el ping cada cinco segundos para mantener legible la
   secuencia de conexión y escenas.
-- En modo LAN, Co-ophead habilita la actualización de Unity en segundo plano para que
-  el handshake no expire al cambiar el foco entre Cuphead y herramientas de prueba.
-  Esto está marcado explícitamente como temporal mediante
-  `[Testing] RunInBackground = true`. El comportamiento previsto para una versión
-  final es `false`; con ese valor se prueba el overlay de espera al abandonar Cuphead.
+- La prueba usa el comportamiento normal de Cuphead:
+  `[Testing] RunInBackground = false`. Al perder el foco, el otro equipo puede entrar
+  en la espera coordinada hasta que Cuphead vuelva a estar activo.
 
 ## Prueba con una sola PC
 

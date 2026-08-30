@@ -9,8 +9,11 @@ namespace Coophead
     internal static class RemoteInputLab
     {
         private const uint SimulatedLatencyFrames = 3;
-        private const uint ModVersionToken = 0x00120B;
-        private const float PeerStallSeconds = 1.25f;
+        private const uint ModVersionToken = 0x001210;
+        // AirGPU/RDP puede entregar frames en ráfagas al cambiar de ventana.
+        // Un hold de 1.25 s pausaba la partida varias veces por un microcorte.
+        private const float PeerStallSeconds = 3f;
+        private const float RemoteInputNeutralizeSeconds = 0.5f;
         private const float ResumeCountdownSeconds = 3f;
         private const float LongWaitSeconds = 15f;
         private const float BlockedSceneRequestTimeoutSeconds = 5f;
@@ -19,6 +22,13 @@ namespace Coophead
         private const float PlayerTwoLocalMovementThreshold = 3f;
         private const float PlayerTwoHostMovementThreshold = 12f;
         private const float RemotePlayerOneSuperDeferralSeconds = 0.35f;
+        private const float RemotePlayerTwoSuperDeferralSeconds = 0.35f;
+        private const float PlayerTwoSuperRequestAdvertiseSeconds = 3f;
+        private const float DisconnectGraceSeconds = 0.75f;
+        private const float ReturnToStartRetrySeconds = 1f;
+        private const float RemoteStateInterpolationDelaySeconds = 0.075f;
+        private const float RemoteStateNominalIntervalSeconds = 1f / 60f;
+        private const int RemoteStateBufferCapacity = 24;
         private const InputButtons FixedGameplayButtons = InputButtons.Jump |
             InputButtons.Shoot | InputButtons.Super | InputButtons.SwitchWeapon |
             InputButtons.Lock | InputButtons.Dash;
@@ -32,6 +42,8 @@ namespace Coophead
                 System.Type.EmptyTypes);
         private static readonly System.Reflection.MethodInfo LevelPlayerJoinedMethod =
             AccessTools.Method(typeof(Level), "OnPlayerJoined", new[] { typeof(PlayerId) });
+        private static readonly System.Reflection.MethodInfo GoToStartScreenMethod =
+            AccessTools.Method(typeof(PlayerManager), "goToStartScreen");
         private static readonly System.Reflection.FieldInfo LevelAllowMultiplayerField =
             AccessTools.Field(typeof(Level), "allowMultiplayer");
         private static readonly System.Reflection.FieldInfo LevelPlayersField =
@@ -44,6 +56,12 @@ namespace Coophead
             LevelPlayerMotorHitManagerField == null ? null :
                 AccessTools.Field(LevelPlayerMotorHitManagerField.FieldType,
                     "direction");
+        private static readonly System.Reflection.FieldInfo LevelPlayerMotorLastPositionField =
+            AccessTools.Field(typeof(LevelPlayerMotor), "lastPosition");
+        private static readonly System.Reflection.FieldInfo LevelPlayerMotorLastPositionFixedField =
+            AccessTools.Field(typeof(LevelPlayerMotor), "lastPositionFixed");
+        private static readonly System.Reflection.FieldInfo PlayerIsRevivingField =
+            AccessTools.Field(typeof(AbstractPlayerController), "_isReviving");
 
         private static IInputFrameTransport transport =
             new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -69,7 +87,8 @@ namespace Coophead
         private static string lastTransportStatus;
         private static bool originalRunInBackground;
         private static bool runInBackgroundCaptured;
-        private static bool runInBackgroundForTesting = true;
+        private static bool runInBackgroundForTesting;
+        private static bool blockLocalInputWhenUnfocused;
         private static SessionContext lastSentContext;
         private static bool hasLastSentContext;
         private static SessionContext latestRemoteContext;
@@ -82,6 +101,16 @@ namespace Coophead
         private static float lastRemotePlayerStateRealtime;
         private static uint lastRemotePlayerStateTick;
         private static bool hasRemotePlayerStateTick;
+        private static readonly System.Collections.Generic.List<BufferedPlayerState>
+            remotePlayerStateBuffer =
+                new System.Collections.Generic.List<BufferedPlayerState>(
+                    RemoteStateBufferCapacity);
+        private static float lastBufferedPlayerStateRealtime;
+        private static float maxBufferedPlayerStateGap;
+        private static float maxPlayerOneRenderError;
+        private static float maxPlayerTwoRenderError;
+        private static float lastRenderTelemetryRealtime;
+        private static bool authoritativeMapRenderReported;
         private static bool transportWasConnected;
         private static bool samplingLocalInput;
         private static bool lateSpawnFailureReported;
@@ -96,6 +125,8 @@ namespace Coophead
         private static bool remoteInputReported;
         private static bool playerStateSentReported;
         private static bool playerStateReceivedReported;
+        private static bool loadoutHealthAgreementReported;
+        private static bool loadoutHealthMismatchReported;
         private static bool hostMapAxesReported;
         private static bool remoteMapAxesReported;
         private static bool playerOneVisualReported;
@@ -111,15 +142,62 @@ namespace Coophead
         private static bool superButtonReported;
         private static bool lockButtonReported;
         private static float remotePlayerOneSuperDeferralDeadline;
+        private static float remotePlayerTwoSuperDeferralDeadline;
         private static uint hostPlayerOneSuperActionSequence;
+        private static uint hostPlayerTwoSuperActionSequence;
         private static uint lastRemotePlayerOneSuperActionSequence;
         private static bool hasRemotePlayerOneSuperActionSequence;
+        private static uint lastRemotePlayerTwoSuperActionSequence;
+        private static bool hasRemotePlayerTwoSuperActionSequence;
+        private static uint localPlayerTwoSuperRequestSequence;
+        private static float localPlayerTwoSuperRequestAdvertiseDeadline;
+        private static uint localInputSessionNonce;
+        private static uint lastRemoteInputSessionNonce;
+        private static uint localStateSessionNonce;
+        private static uint lastRemoteStateSessionNonce;
+        private static PlayerLoadoutSnapshot localGuestLoadout;
+        private static uint localGuestLoadoutRevision;
+        private static bool hasLocalGuestLoadout;
+        private static PlayerLoadoutSnapshot remoteGuestLoadout;
+        private static uint remoteGuestLoadoutRevision;
+        private static bool hasRemoteGuestLoadout;
+        private static PlayerData.PlayerLoadouts.PlayerLoadout
+            hostPlayerTwoLoadoutOverlay;
+        private static PlayerData.PlayerLoadouts.PlayerLoadout
+            clientPlayerOneLoadoutOverlay;
+        private static PlayerData.PlayerLoadouts.PlayerLoadout
+            clientPlayerTwoLoadoutOverlay;
+        private static bool hasClientPlayerOneLoadoutOverlay;
+        private static bool hasClientPlayerTwoLoadoutOverlay;
+        private static uint lastRemotePlayerTwoSuperRequestSequence;
+        private static bool hasRemotePlayerTwoSuperRequestSequence;
+        private static readonly System.Collections.Generic.Queue<PlayerTwoSuperRequest>
+            hostPendingPlayerTwoSuperRequests =
+                new System.Collections.Generic.Queue<PlayerTwoSuperRequest>();
+        private static uint hostOfferedPlayerTwoSuperRequestSequence;
+        private static readonly System.Collections.Generic.Queue<uint>
+            localPlayerTwoSuperDispatchQueue =
+                new System.Collections.Generic.Queue<uint>();
+        private static uint localPlayerTwoSuperDispatchedForFixed;
+        private static readonly System.Collections.Generic.HashSet<uint>
+            localPredictedPlayerTwoSuperRequests =
+                new System.Collections.Generic.HashSet<uint>();
+        private static readonly System.Collections.Generic.Queue<uint>
+            playerTwoConfirmedSuperQueue =
+                new System.Collections.Generic.Queue<uint>();
+        private static uint playerTwoConfirmedSuperDispatchedForFixed;
+        private static float remoteMapAcceptDeadline;
+        private static bool mapLevelInteractionInputProbeActive;
+        private static float playerTwoMapNeutralSinceRealtime;
         private static int originalClientSaveSlot;
         private static bool originalClientPlayerOneIsMugman;
         private static bool originalClientSavePlayerOneIsMugman;
         private static Level.Mode originalClientDifficulty;
         private static bool originalClientInGame;
+        private static string originalClientDialoguerState;
         private static bool originalClientContextCaptured;
+        private static readonly bool[] clientSlotStateCaptured = new bool[3];
+        private static readonly string[] clientSlotOriginalJson = new string[3];
         private static SessionHoldState sessionHoldState;
         private static string sessionHoldReason = string.Empty;
         private static float sessionHoldStartedRealtime;
@@ -131,6 +209,7 @@ namespace Coophead
         private static bool levelGatePauseRequested;
         private static float lastRemoteInputRealtime;
         private static bool hasRemoteInputActivity;
+        private static bool remoteInputNeutralizedForStall;
         private static bool remoteClientWaiting;
         private static bool clientHoldAcknowledgedByHost;
         private static bool sceneTransitionActive;
@@ -140,6 +219,8 @@ namespace Coophead
         private static float sceneTransitionStartedRealtime;
         private static byte sceneTransitionDifficulty;
         private static bool backgroundSettingRepairReported;
+        private static bool localPhysicalInputNeedsRearm;
+        private static int localPhysicalInputRearmNotBeforeFrame;
         private static bool applyingHostSceneCommand;
         private static string blockedClientSceneRequest = string.Empty;
         private static float blockedClientSceneRequestRealtime;
@@ -147,7 +228,23 @@ namespace Coophead
         private static bool levelPlayerOneBootstrapCompleted;
         private static bool levelPlayerTwoBootstrapCompleted;
         private static bool remoteSceneLoadStarted;
+        private static uint remoteSceneLoadObservedTransitionId;
+        private static uint remoteSameSceneReloadTransitionId;
+        private static uint deferredRemoteSceneTransitionId;
+        private static bool deferredRemoteSceneRequiresReload;
+        private static float deferredRemoteSceneReceivedRealtime;
+        private static int deferredRemoteSceneLoaderIdleFrame = -1;
         private static bool returnToMapAfterAbortedLoad;
+        private static bool internalPlayerLeave;
+        private static bool returnToStartAfterSession;
+        private static float returnToStartRetryNotBeforeRealtime;
+        private static float clientRestoreRetryNotBeforeRealtime;
+        private static bool sessionStopPending;
+        private static bool pendingSessionStopReturnToStart;
+        private static float pendingSessionStopDeadlineRealtime;
+        private static int pendingSessionStopFinalizeNotBeforeFrame;
+        private static string sessionNotice = string.Empty;
+        private static float sessionNoticeDeadline;
 
         public static bool Enabled { get; private set; }
         private static bool IsHost => transportMode == InputTransportMode.LanHost ||
@@ -158,18 +255,37 @@ namespace Coophead
         public static bool IsHostSession => Enabled && IsHost;
         public static bool IsClientSession => Enabled && IsClient;
         public static bool IsConnected => Enabled && transport.IsConnected;
+        public static bool LoadoutHandshakeReady => IsConnected &&
+            (IsHost ? hasRemoteGuestLoadout :
+                (!IsClient || hasLocalGuestLoadout));
+        public static bool ClientMapIsHostAuthoritative =>
+            IsClientSession && Map.Current != null;
         public static bool IsSamplingLocalInput => samplingLocalInput;
-        public static bool PreventLocalSave => IsClientSession;
+        public static bool LocalPhysicalInputBlocked =>
+            blockLocalInputWhenUnfocused &&
+            (!Plugin.HasApplicationFocus || localPhysicalInputNeedsRearm);
+        public static bool PreventLocalSave => IsClientSession ||
+            originalClientContextCaptured ||
+            HasCapturedClientSlotState();
         public static string TransportStatus => transport.Status;
         public static int PingMilliseconds => transport.PingMilliseconds;
         public static int EstimatedPacketLossPercent =>
             transport.EstimatedPacketLossPercent;
+        public static string SessionNotice =>
+            Time.realtimeSinceStartup <= sessionNoticeDeadline ?
+                sessionNotice : string.Empty;
         public static bool SessionOverlayVisible => Enabled &&
             sessionHoldState != SessionHoldState.None;
         public static bool SceneTransitionActive => Enabled && sceneTransitionActive;
         internal static uint CurrentSceneEpoch => currentSceneEpoch;
         public static bool IsClientReadyForLoadGate(string sceneName)
         {
+            if (IsClientSession && sceneTransitionActive &&
+                sceneName == sceneTransitionTarget &&
+                remoteSameSceneReloadTransitionId == sceneTransitionId &&
+                (!remoteSceneLoadStarted ||
+                remoteSceneLoadObservedTransitionId != sceneTransitionId))
+                return false;
             if (!sceneName.StartsWith("scene_map_"))
                 return true;
             if (SceneManager.GetActiveScene().name != sceneName || Map.Current == null ||
@@ -197,6 +313,14 @@ namespace Coophead
         public static bool CanLeaveInterruptedSession => SessionOverlayVisible &&
             !SessionIsResuming &&
             Time.realtimeSinceStartup - sessionHoldStartedRealtime >= LongWaitSeconds;
+
+        public static void ContinueWaiting()
+        {
+            if (!SessionOverlayVisible || SessionIsResuming)
+                return;
+            sessionHoldStartedRealtime = Time.realtimeSinceStartup;
+            Plugin.Log.LogMessage("[SessionHold] El jugador eligió seguir esperando.");
+        }
         public static string CurrentRoomCode
         {
             get
@@ -218,9 +342,38 @@ namespace Coophead
             runInBackgroundForTesting = enabled;
             Application.runInBackground = enabled;
             backgroundSettingRepairReported = false;
-            Plugin.Log.LogInfo("[Testing] RunInBackground temporal: " +
+            Plugin.Log.LogInfo("[Testing] RunInBackground: " +
                 (enabled ? "ACTIVADO" : "DESACTIVADO") +
                 " (Unity=" + Application.runInBackground + ").");
+        }
+
+        public static void SetBlockLocalInputWhenUnfocused(bool enabled)
+        {
+            blockLocalInputWhenUnfocused = enabled;
+            if (!enabled)
+            {
+                localPhysicalInputNeedsRearm = false;
+                localPhysicalInputRearmNotBeforeFrame = 0;
+            }
+            Plugin.Log.LogInfo("[Testing] Filtro de input local sin foco: " +
+                (enabled ? "ACTIVADO" : "DESACTIVADO") + ".");
+        }
+
+        public static void OnApplicationFocusChanged(bool hasFocus)
+        {
+            if (!blockLocalInputWhenUnfocused)
+                return;
+            if (!hasFocus)
+            {
+                localPhysicalInputNeedsRearm = true;
+                localPhysicalInputRearmNotBeforeFrame = int.MaxValue;
+            }
+            else if (localPhysicalInputNeedsRearm)
+            {
+                // Consume por completo el clic/tecla que devolvió el foco antes
+                // de permitir que un menú o el motor de Player One lo vea.
+                localPhysicalInputRearmNotBeforeFrame = Time.frameCount + 1;
+            }
         }
 
         public static void StartInternet(bool host, string signalingUrl, string stunHost,
@@ -239,8 +392,97 @@ namespace Coophead
             if (!Enabled)
                 return;
 
+            // El invitado no puede continuar con una simulación autoritativa propia.
+            // El host sí puede retirar a P2 y seguir jugando en solitario.
+            BeginSessionStop(TransportDisconnectReason.Normal, true, IsClient);
+        }
+
+        private static void BeginSessionStop(TransportDisconnectReason reason,
+            bool notifyPeer, bool returnToStart,
+            bool flushTransportBeforeClose = false)
+        {
+            if (!Enabled)
+                return;
+
+            if (sessionStopPending)
+            {
+                pendingSessionStopReturnToStart |= returnToStart;
+                return;
+            }
+
             LevelLoadGate.Reset();
-            TryLeavePlayerTwo();
+            sessionStopPending = true;
+            pendingSessionStopReturnToStart = returnToStart;
+            pendingSessionStopDeadlineRealtime = Time.realtimeSinceStartup +
+                DisconnectGraceSeconds;
+            pendingSessionStopFinalizeNotBeforeFrame = Time.frameCount +
+                (flushTransportBeforeClose ? 1 : 0);
+
+            if (notifyPeer)
+            {
+                try
+                {
+                    transport.RequestDisconnect(reason);
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning("[SessionSync] No se pudo enviar la " +
+                        "despedida: " + ex.Message);
+                    FinalizeSessionStop();
+                    return;
+                }
+            }
+
+            // Sin una conexión viva no hay ACK ni reintento que esperar. Cuando
+            // acabamos de recibir una despedida, en cambio, conservamos un frame
+            // adicional para que transportes con escritura encolada envíen el ACK.
+            if (!flushTransportBeforeClose && !transport.IsConnected)
+                FinalizeSessionStop();
+        }
+
+        private static void UpdatePendingSessionStop()
+        {
+            if (!sessionStopPending ||
+                Time.frameCount < pendingSessionStopFinalizeNotBeforeFrame)
+                return;
+
+            if (transport.PeerDisconnected &&
+                transport.PeerDisconnectReason ==
+                    TransportDisconnectReason.RemovePlayer)
+            {
+                pendingSessionStopReturnToStart = true;
+            }
+
+            // UDP se vuelve terminal al recibir el ACK o al agotar su ráfaga de
+            // reintentos. Relay/P2P también pueden cerrarse al recibir el ACK. El
+            // deadline limita el cierre si el peer desapareció antes de responder.
+            if (transport.IsConnected && !transport.PeerDisconnected &&
+                Time.realtimeSinceStartup < pendingSessionStopDeadlineRealtime)
+                return;
+
+            FinalizeSessionStop();
+        }
+
+        private static void FinalizeSessionStop()
+        {
+            if (!Enabled)
+                return;
+
+            var shouldReturnToStart = pendingSessionStopReturnToStart;
+            sessionStopPending = false;
+            pendingSessionStopReturnToStart = false;
+            pendingSessionStopDeadlineRealtime = 0f;
+            pendingSessionStopFinalizeNotBeforeFrame = 0;
+
+            internalPlayerLeave = true;
+            try
+            {
+                TryLeavePlayerTwo();
+            }
+            finally
+            {
+                internalPlayerLeave = false;
+            }
             SetEnabled(false);
             var previousTransport = transport;
             transport = new LoopbackInputTransport(SimulatedLatencyFrames);
@@ -257,6 +499,12 @@ namespace Coophead
             finally
             {
                 RestoreVanillaPlayerManagerState();
+            }
+
+            if (shouldReturnToStart)
+            {
+                returnToStartAfterSession = true;
+                returnToStartRetryNotBeforeRealtime = 0f;
             }
         }
 
@@ -294,10 +542,20 @@ namespace Coophead
 
         public static void Shutdown()
         {
+            if (Enabled)
+            {
+                try
+                {
+                    transport.RequestDisconnect(TransportDisconnectReason.Normal);
+                }
+                catch { }
+            }
             LevelLoadGate.Reset();
             RestoreClientContext();
             ResetSessionHoldState(true);
             Enabled = false;
+            localPhysicalInputNeedsRearm = false;
+            localPhysicalInputRearmNotBeforeFrame = 0;
             ResetRemotePlayerState();
             transport.Dispose();
             if (runInBackgroundCaptured)
@@ -309,10 +567,14 @@ namespace Coophead
 
         public static void Tick()
         {
-            if (Input.GetKeyDown(KeyCode.F8) && !Enabled)
+            UpdateLocalPhysicalInputFocusGate();
+            TryRestorePendingClientContext();
+            TryReturnToStartAfterSession();
+
+            if (!LocalPhysicalInputBlocked && Input.GetKeyDown(KeyCode.F8) && !Enabled)
                 SetEnabled(true);
 
-            if (Input.GetKeyDown(KeyCode.F7) && Enabled)
+            if (!LocalPhysicalInputBlocked && Input.GetKeyDown(KeyCode.F7) && Enabled)
                 StopSession();
 
             if (runInBackgroundForTesting && !Application.runInBackground)
@@ -338,7 +600,14 @@ namespace Coophead
             remotePlayerOneInput.Released = InputButtons.None;
 
             transport.Update();
+            if (sessionStopPending)
+            {
+                UpdatePendingSessionStop();
+                return;
+            }
             ProcessConnectionTransition();
+            if (!Enabled || sessionStopPending)
+                return;
             if (lastTransportStatus != transport.Status)
             {
                 lastTransportStatus = transport.Status;
@@ -371,6 +640,8 @@ namespace Coophead
             {
                 if (transport.IsConnected)
                 {
+                    if (!hasLocalGuestLoadout)
+                        TryCaptureLocalGuestLoadout();
                     var sampled = SampleConfiguredPlayerInput();
                     sampled.Tick = sourceTick;
                     var physicalHeld = sampled.Held;
@@ -398,7 +669,24 @@ namespace Coophead
                     {
                         sampled.Pressed |= sampled.Held & ~previousHeld;
                         sampled.Released |= previousHeld & ~sampled.Held;
+                        if ((sampled.Pressed & InputButtons.Super) != 0)
+                        {
+                            localPlayerTwoSuperRequestSequence++;
+                            if (localPlayerTwoSuperRequestSequence == 0)
+                                localPlayerTwoSuperRequestSequence = 1;
+                            localPlayerTwoSuperDispatchQueue.Enqueue(
+                                localPlayerTwoSuperRequestSequence);
+                            localPlayerTwoSuperRequestAdvertiseDeadline =
+                                Time.realtimeSinceStartup +
+                                PlayerTwoSuperRequestAdvertiseSeconds;
+                        }
                     }
+                    sampled.PlayerTwoSuperRequestSequence =
+                        Time.realtimeSinceStartup <=
+                            localPlayerTwoSuperRequestAdvertiseDeadline ?
+                            localPlayerTwoSuperRequestSequence : 0;
+                    sampled.InputSessionNonce = localInputSessionNonce;
+                    AttachLocalGuestLoadout(ref sampled);
                     previousHeld = physicalHeld;
                     received = sampled;
                     QueuePlayerTwoFixedEdges(sampled.Pressed, sampled.Released);
@@ -410,7 +698,8 @@ namespace Coophead
                         localFrameSentReported = true;
                         Plugin.Log.LogMessage("[InputSync] El invitado comenzó a enviar frames " +
                             "(H=" + sampled.Horizontal + " V=" + sampled.Vertical +
-                            " botones=" + (uint)sampled.Held + ").");
+                            " botones=" + (uint)sampled.Held +
+                            "; fuente=Rewired Player One; respaldo fijo=apagado).");
                     }
                     if (!localInputReported && HasInput(sampled))
                     {
@@ -434,6 +723,7 @@ namespace Coophead
                 sampled.Tick = sourceTick;
                 sampled.Pressed |= sampled.Held & ~previousHeld;
                 sampled.Released |= previousHeld & ~sampled.Held;
+                sampled.InputSessionNonce = localInputSessionNonce;
                 previousHeld = sampled.Held;
                 transport.Send(sampled);
             }
@@ -446,6 +736,32 @@ namespace Coophead
                 var released = InputButtons.None;
                 while (transport.TryReceive(sourceTick, out delivered))
                 {
+                    if (delivered.InputSessionNonce != 0 &&
+                        delivered.InputSessionNonce != lastRemoteInputSessionNonce)
+                        ResetRemoteInputEpoch(delivered.InputSessionNonce);
+                    AcceptRemoteGuestLoadout(delivered);
+                    if (delivered.PlayerTwoSuperRequestSequence != 0 &&
+                        (!hasRemotePlayerTwoSuperRequestSequence ||
+                        IsNewerTick(delivered.PlayerTwoSuperRequestSequence,
+                            lastRemotePlayerTwoSuperRequestSequence)))
+                    {
+                        lastRemotePlayerTwoSuperRequestSequence =
+                            delivered.PlayerTwoSuperRequestSequence;
+                        hasRemotePlayerTwoSuperRequestSequence = true;
+                        hostPendingPlayerTwoSuperRequests.Enqueue(
+                            new PlayerTwoSuperRequest(
+                                delivered.PlayerTwoSuperRequestSequence));
+                        // La secuencia permanece en frames posteriores, así el
+                        // host recupera el tap aunque el paquete del borde se pierda.
+                        Plugin.Log.LogMessage("[InputSync] Solicitud fiable de " +
+                            "EX/Super P2 recibida (#" +
+                            delivered.PlayerTwoSuperRequestSequence + ").");
+                    }
+                    // En una sesión host, el pulso fiable de EX/Super sale sólo
+                    // de la cola causal anterior. El borde UDP no puede adelantar
+                    // ni duplicar una solicitud.
+                    if (IsHost)
+                        delivered.Pressed &= ~InputButtons.Super;
                     pressed |= delivered.Pressed;
                     released |= delivered.Released;
                     received = delivered;
@@ -453,10 +769,20 @@ namespace Coophead
                 }
                 if (deliveredAny)
                 {
+                    remoteInputNeutralizedForStall = false;
                     received.Pressed = pressed;
                     received.Released = released;
                     QueuePlayerTwoFixedEdges(pressed, released);
                     ReportPlayerTwoCombatButtons("recibió del invitado", received);
+                    if (IsHost && Map.Current != null &&
+                        (pressed & InputButtons.Accept) != 0)
+                    {
+                        var holdSeconds = Mathf.Clamp(
+                            transport.PingMilliseconds * 0.001f + 0.1f,
+                            0.25f, 0.75f);
+                        remoteMapAcceptDeadline = Time.realtimeSinceStartup +
+                            holdSeconds;
+                    }
                     if (!remoteFrameReceivedReported)
                     {
                         remoteFrameReceivedReported = true;
@@ -486,6 +812,7 @@ namespace Coophead
                 }
             }
 
+            NeutralizeStaleRemoteInput();
             UpdateSessionHold();
 
         }
@@ -518,14 +845,55 @@ namespace Coophead
                 return;
             }
 
+            var gameplayInputLocked = IsGameplayInputLocked();
+            AdvanceHostPlayerTwoSuperRequestDeadline(gameplayInputLocked);
+
             playerTwoFixedPressed = playerTwoPendingPressed;
             playerTwoFixedReleased = playerTwoPendingReleased;
+            localPlayerTwoSuperDispatchedForFixed = 0;
+            playerTwoConfirmedSuperDispatchedForFixed = 0;
+            if (IsClientSession || IsHostSession)
+                playerTwoFixedPressed &= ~InputButtons.Super;
+            if (!gameplayInputLocked && IsClientSession)
+            {
+                if (playerTwoConfirmedSuperQueue.Count != 0)
+                {
+                    playerTwoConfirmedSuperDispatchedForFixed =
+                        playerTwoConfirmedSuperQueue.Peek();
+                    playerTwoFixedPressed |= InputButtons.Super;
+                    remotePlayerTwoSuperDeferralDeadline =
+                        Time.realtimeSinceStartup +
+                        RemotePlayerTwoSuperDeferralSeconds;
+                }
+                else if (localPlayerTwoSuperDispatchQueue.Count != 0)
+                {
+                    localPlayerTwoSuperDispatchedForFixed =
+                        localPlayerTwoSuperDispatchQueue.Dequeue();
+                    playerTwoFixedPressed |= InputButtons.Super;
+                }
+            }
             playerTwoPendingPressed = InputButtons.None;
             playerTwoPendingReleased = InputButtons.None;
+
             remotePlayerOneFixedPressed = remotePlayerOnePendingPressed;
             remotePlayerOneFixedReleased = remotePlayerOnePendingReleased;
             remotePlayerOnePendingPressed = InputButtons.None;
             remotePlayerOnePendingReleased = InputButtons.None;
+            if (gameplayInputLocked &&
+                (remotePlayerOneFixedPressed & InputButtons.Super) != 0)
+            {
+                remotePlayerOneFixedPressed &= ~InputButtons.Super;
+                remotePlayerOnePendingPressed |= InputButtons.Super;
+                remotePlayerOneSuperDeferralDeadline =
+                    Time.realtimeSinceStartup +
+                    RemotePlayerOneSuperDeferralSeconds;
+            }
+            else if ((remotePlayerOneFixedPressed & InputButtons.Super) != 0)
+            {
+                remotePlayerOneSuperDeferralDeadline =
+                    Time.realtimeSinceStartup +
+                    RemotePlayerOneSuperDeferralSeconds;
+            }
         }
 
         private static void SetEnabled(bool enabled)
@@ -536,6 +904,7 @@ namespace Coophead
                 ResetSessionHoldState(true);
             }
             Enabled = enabled;
+            ResetSessionLoadouts();
             previousHeld = InputButtons.None;
             previousHostPlayerOneHeld = InputButtons.None;
             received = new InputFrame();
@@ -562,6 +931,8 @@ namespace Coophead
             remoteInputReported = false;
             playerStateSentReported = false;
             playerStateReceivedReported = false;
+            loadoutHealthAgreementReported = false;
+            loadoutHealthMismatchReported = false;
             hostMapAxesReported = false;
             remoteMapAxesReported = false;
             playerOneVisualReported = false;
@@ -570,10 +941,28 @@ namespace Coophead
             superButtonReported = false;
             lockButtonReported = false;
             hostPlayerOneSuperActionSequence = 0;
+            hostPlayerTwoSuperActionSequence = 0;
             lastRemotePlayerOneSuperActionSequence = 0;
             hasRemotePlayerOneSuperActionSequence = false;
+            lastRemotePlayerTwoSuperActionSequence = 0;
+            hasRemotePlayerTwoSuperActionSequence = false;
+            localPlayerTwoSuperRequestSequence = 0;
+            localPlayerTwoSuperRequestAdvertiseDeadline = 0f;
+            localInputSessionNonce = CreateInputSessionNonce();
+            lastRemoteInputSessionNonce = 0;
+            localStateSessionNonce = CreateInputSessionNonce();
+            lastRemoteStateSessionNonce = 0;
+            lastRemotePlayerTwoSuperRequestSequence = 0;
+            hasRemotePlayerTwoSuperRequestSequence = false;
+            ClearPlayerTwoSuperRequestQueues();
+            remotePlayerOneSuperDeferralDeadline = 0f;
+            remotePlayerTwoSuperDeferralDeadline = 0f;
+            remoteMapAcceptDeadline = 0f;
+            mapLevelInteractionInputProbeActive = false;
+            playerTwoMapNeutralSinceRealtime = 0f;
             lastRemoteInputRealtime = 0f;
             hasRemoteInputActivity = false;
+            remoteInputNeutralizedForStall = false;
             remoteClientWaiting = false;
             clientHoldAcknowledgedByHost = false;
             sceneTransitionActive = false;
@@ -589,6 +978,9 @@ namespace Coophead
             levelPlayerOneBootstrapCompleted = false;
             levelPlayerTwoBootstrapCompleted = false;
             remoteSceneLoadStarted = false;
+            remoteSceneLoadObservedTransitionId = 0;
+            remoteSameSceneReloadTransitionId = 0;
+            ClearDeferredRemoteSceneTransition();
             backgroundSettingRepairReported = false;
             if (enabled)
             {
@@ -596,9 +988,33 @@ namespace Coophead
                 ResetSessionHoldState(false);
             }
             if (enabled && IsClient)
+            {
                 CaptureOriginalClientContext();
+                TryCaptureLocalGuestLoadout();
+            }
             Plugin.Log.LogMessage("Remote Input Lab " + (Enabled ? "ACTIVADO" : "DESACTIVADO") +
                 (Enabled ? " (" + transport.Description + ")." : "."));
+        }
+
+        private static void NeutralizeStaleRemoteInput()
+        {
+            if (!IsHost || !hasRemoteInputActivity ||
+                remoteInputNeutralizedForStall ||
+                Time.realtimeSinceStartup - lastRemoteInputRealtime <
+                    RemoteInputNeutralizeSeconds)
+                return;
+
+            var held = received.Held;
+            received.Horizontal = 0;
+            received.Vertical = 0;
+            received.Held = InputButtons.None;
+            received.Pressed = InputButtons.None;
+            received.Released |= held;
+            QueuePlayerTwoFixedEdges(InputButtons.None, held);
+            remoteInputNeutralizedForStall = true;
+            Plugin.Log.LogWarning("[InputSync] P2 neutralizado tras " +
+                RemoteInputNeutralizeSeconds.ToString("0.0") +
+                " s sin frames; la sesión seguirá activa hasta el umbral de espera.");
         }
 
         private static void UpdateSessionHold()
@@ -654,7 +1070,11 @@ namespace Coophead
             received = new InputFrame();
             remotePlayerOneInput.Pressed = InputButtons.None;
             remotePlayerOneInput.Released = InputButtons.None;
+            var durablePlayerOneSuper =
+                (remotePlayerOnePendingPressed | remotePlayerOneFixedPressed) &
+                InputButtons.Super;
             ResetInputEdgeLatches();
+            remotePlayerOnePendingPressed |= durablePlayerOneSuper;
             ApplySessionPause();
             Plugin.Log.LogWarning("[SessionHold] " + sessionHoldReason);
         }
@@ -818,10 +1238,8 @@ namespace Coophead
                         Difficulty = sceneTransitionDifficulty,
                         Flags = SceneCommandFlags.CancelCoordinatedTransition,
                     });
-                    // UdpInputTransport conserva los comandos hasta recibir ACK, pero
-                    // StopSession cierra el socket enseguida. Este Update envía el
-                    // aviso al menos una vez antes de cerrar; el timeout de conexión
-                    // sigue siendo la recuperación secundaria del invitado.
+                    // Adelanta el primer envío de la cancelación antes de iniciar la
+                    // despedida fiable de la sesión.
                     transport.Update();
                 }
             }
@@ -830,13 +1248,14 @@ namespace Coophead
                 Plugin.Log.LogWarning("[ReadyGate] No se pudo avisar la cancelación: " +
                     ex.Message);
             }
-            StopSession();
+            BeginSessionStop(TransportDisconnectReason.Normal, true, false);
             returnToMapAfterAbortedLoad = shouldReturnToMap;
         }
 
         private static void TryReturnToMapAfterAbortedLoad()
         {
-            if (!returnToMapAfterAbortedLoad || SceneLoader.CurrentlyLoading)
+            if (!returnToMapAfterAbortedLoad || sessionStopPending ||
+                SceneLoader.CurrentlyLoading || PreventLocalSave)
                 return;
 
             returnToMapAfterAbortedLoad = false;
@@ -899,7 +1318,8 @@ namespace Coophead
 
         private static void EnsurePlayerTwoPresent()
         {
-            if (!Enabled || !transport.IsConnected)
+            if (!Enabled || !transport.IsConnected ||
+                (IsHost && !hasRemoteGuestLoadout))
                 return;
 
             RecoverLateSpawnedMapPlayer();
@@ -1065,22 +1485,28 @@ namespace Coophead
 
         public static bool ShouldSuppressPlayerOne(Player player)
         {
-            if (!IsClientSession || !transport.IsConnected || samplingLocalInput ||
-                player == null)
+            if (samplingLocalInput || player == null)
                 return false;
 
+            bool isPlayerOne;
             try
             {
-                if (Map.Current == null && Level.Current == null && !HasPlayerTwoActor())
-                    return false;
                 var expected = PlayerManager.GetPlayerInput(PlayerId.PlayerOne);
-                return object.ReferenceEquals(player, expected) ||
+                isPlayerOne = object.ReferenceEquals(player, expected) ||
                     (expected == null && player.id == 0);
             }
             catch
             {
-                return false;
+                isPlayerOne = player.id == 0;
             }
+
+            if (!isPlayerOne)
+                return false;
+            if (LocalPhysicalInputBlocked)
+                return true;
+            if (!IsClientSession || !transport.IsConnected)
+                return false;
+            return Map.Current != null || Level.Current != null || HasPlayerTwoActor();
         }
 
         public static bool ShouldOverridePlayerOneVisual(Player player)
@@ -1117,7 +1543,8 @@ namespace Coophead
 
         public static bool GetRemotePlayerOneButton(int actionId, ButtonPhase phase)
         {
-            if (!CanDriveRemotePlayerOneVisual())
+            if (!CanDriveRemotePlayerOneVisual() ||
+                ClientMapIsHostAuthoritative)
                 return false;
             var button = MapButton(actionId);
             if (button == InputButtons.None)
@@ -1159,11 +1586,15 @@ namespace Coophead
                 return true;
             }
 
-            if (input.playerId != PlayerId.PlayerOne || !CanDriveRemotePlayerOneVisual())
+            if (input.playerId != PlayerId.PlayerOne)
                 return false;
-            horizontal = remotePlayerOneInput.Horizontal / 127f;
-            vertical = remotePlayerOneInput.Vertical / 127f;
-            return true;
+            if (CanDriveRemotePlayerOneVisual())
+            {
+                horizontal = remotePlayerOneInput.Horizontal / 127f;
+                vertical = remotePlayerOneInput.Vertical / 127f;
+                return true;
+            }
+            return LocalPhysicalInputBlocked;
         }
 
         public static bool TryGetPlayerInputButton(PlayerInput input, CupheadButton button,
@@ -1172,16 +1603,24 @@ namespace Coophead
             value = false;
             if (input == null || samplingLocalInput)
                 return false;
+            if (ClientMapIsHostAuthoritative &&
+                (input.playerId == PlayerId.PlayerOne ||
+                    input.playerId == PlayerId.PlayerTwo))
+                return true;
             if (input.playerId == PlayerId.PlayerTwo && DrivesPlayerTwo)
             {
                 value = GetButton((int)button, ButtonPhase.Held);
                 ReportRewiredRead();
                 return true;
             }
-            if (input.playerId != PlayerId.PlayerOne || !CanDriveRemotePlayerOneVisual())
+            if (input.playerId != PlayerId.PlayerOne)
                 return false;
-            value = GetRemotePlayerOneButton((int)button, ButtonPhase.Held);
-            return true;
+            if (CanDriveRemotePlayerOneVisual())
+            {
+                value = GetRemotePlayerOneButton((int)button, ButtonPhase.Held);
+                return true;
+            }
+            return LocalPhysicalInputBlocked;
         }
 
         private static bool CanDriveRemotePlayerOneVisual()
@@ -1198,39 +1637,99 @@ namespace Coophead
                 (latestRemotePlayerState.Flags & PlayerStateFlags.GameplayStarted) != 0;
         }
 
-        internal static bool ShouldDeferRemotePlayerOneSuperMeter(
+        internal static bool ShouldDeferRemotePlayerSuperMeter(PlayerId id,
             float currentMeter, float authoritativeMeter)
         {
+            var deadline = id == PlayerId.PlayerOne ?
+                remotePlayerOneSuperDeferralDeadline :
+                remotePlayerTwoSuperDeferralDeadline;
+            var durablePlayerTwoConfirmation = id == PlayerId.PlayerTwo &&
+                playerTwoConfirmedSuperQueue.Count != 0;
             return IsClientSession && transport.IsConnected &&
-                remotePlayerOneSuperDeferralDeadline > 0f &&
                 authoritativeMeter < currentMeter &&
-                Time.realtimeSinceStartup <=
-                    remotePlayerOneSuperDeferralDeadline;
+                (durablePlayerTwoConfirmation ||
+                    (deadline > 0f &&
+                    Time.realtimeSinceStartup <= deadline));
         }
 
-        internal static void NotifyPlayerOneSuperConsumed(
-            PlayerStatsManager stats)
+        internal static void NotifySuperConsumed(PlayerStatsManager stats,
+            float meterBefore, bool fullSuper)
         {
             if (!Enabled || stats == null)
                 return;
             try
             {
-                var player = PlayerManager.GetPlayer(PlayerId.PlayerOne);
-                if (player == null || !object.ReferenceEquals(player.stats, stats))
+                AbstractPlayerController playerOne = null;
+                AbstractPlayerController playerTwo = null;
+                try { playerOne = PlayerManager.GetPlayer(PlayerId.PlayerOne); }
+                catch { }
+                try { playerTwo = PlayerManager.GetPlayer(PlayerId.PlayerTwo); }
+                catch { }
+                var isPlayerOne = playerOne != null &&
+                    object.ReferenceEquals(playerOne.stats, stats);
+                var isPlayerTwo = playerTwo != null &&
+                    object.ReferenceEquals(playerTwo.stats, stats);
+                if (!isPlayerOne && !isPlayerTwo)
+                    return;
+                // OnEx también retorna temprano con ciertos charms. No se debe
+                // confirmar una carta que Cuphead realmente no descontó.
+                if (!fullSuper && stats.SuperMeter >= meterBefore - 0.01f)
                     return;
                 if (IsHostSession && transport.IsConnected)
                 {
-                    hostPlayerOneSuperActionSequence++;
-                    if (hostPlayerOneSuperActionSequence == 0)
-                        hostPlayerOneSuperActionSequence = 1;
+                    if (isPlayerOne)
+                    {
+                        hostPlayerOneSuperActionSequence++;
+                        if (hostPlayerOneSuperActionSequence == 0)
+                            hostPlayerOneSuperActionSequence = 1;
+                    }
+                    else
+                    {
+                        if (hostOfferedPlayerTwoSuperRequestSequence == 0 ||
+                            hostPendingPlayerTwoSuperRequests.Count == 0 ||
+                            hostPendingPlayerTwoSuperRequests.Peek().Sequence !=
+                                hostOfferedPlayerTwoSuperRequestSequence)
+                            return;
+                        var confirmedRequest =
+                            hostPendingPlayerTwoSuperRequests.Dequeue();
+                        hostPlayerTwoSuperActionSequence =
+                            confirmedRequest.Sequence;
+                        hostOfferedPlayerTwoSuperRequestSequence = 0;
+                        Plugin.Log.LogMessage("[InputSync] El host confirmó " +
+                            "EX/Super P2 (#" +
+                            hostPlayerTwoSuperActionSequence + ").");
+                    }
                     return;
                 }
-                if (!IsClientSession ||
-                    remotePlayerOneSuperDeferralDeadline <= 0f)
+                if (!IsClientSession)
                     return;
-                remotePlayerOneSuperDeferralDeadline = 0f;
-                Plugin.Log.LogInfo("[StateSync] El EX/Super remoto consumió " +
-                    "su carta visual; se reanuda el medidor autoritativo.");
+                if (isPlayerOne)
+                {
+                    if (remotePlayerOneSuperDeferralDeadline <= 0f)
+                        return;
+                    remotePlayerOneSuperDeferralDeadline = 0f;
+                    Plugin.Log.LogInfo("[StateSync] El EX/Super remoto consumió " +
+                        "su carta visual; se reanuda el medidor autoritativo.");
+                    return;
+                }
+
+                if (playerTwoConfirmedSuperDispatchedForFixed != 0 &&
+                    playerTwoConfirmedSuperQueue.Count != 0 &&
+                    playerTwoConfirmedSuperQueue.Peek() ==
+                        playerTwoConfirmedSuperDispatchedForFixed)
+                {
+                    playerTwoConfirmedSuperQueue.Dequeue();
+                    playerTwoConfirmedSuperDispatchedForFixed = 0;
+                    remotePlayerTwoSuperDeferralDeadline = 0f;
+                    Plugin.Log.LogInfo("[StateSync] La confirmación del host " +
+                        "reprodujo el EX/Super P2 en el invitado.");
+                }
+                else if (localPlayerTwoSuperDispatchedForFixed != 0)
+                {
+                    localPredictedPlayerTwoSuperRequests.Add(
+                        localPlayerTwoSuperDispatchedForFixed);
+                    localPlayerTwoSuperDispatchedForFixed = 0;
+                }
             }
             catch
             {
@@ -1252,6 +1751,31 @@ namespace Coophead
                     SendCurrentScene();
                 }
             }
+            else if (!connected && transport.PeerDisconnected)
+            {
+                var reason = transport.PeerDisconnectReason;
+                var wasHost = IsHost;
+                Plugin.Log.LogMessage("[SessionSync] Despedida explícita recibida (" +
+                    reason + ").");
+                if (reason == TransportDisconnectReason.RemovePlayer)
+                {
+                    ShowSessionNotice("PLAYER TWO FUE REMOVIDO. REGRESANDO AL INICIO.");
+                    BeginSessionStop(reason, false, true, true);
+                }
+                else if (wasHost)
+                {
+                    ShowSessionNotice("EL INVITADO SE DESCONECTÓ. " +
+                        "LA PARTIDA CONTINÚA EN SOLITARIO.");
+                    BeginSessionStop(reason, false, false, true);
+                }
+                else
+                {
+                    ShowSessionNotice("EL ANFITRIÓN CERRÓ LA SESIÓN. " +
+                        "REGRESANDO AL INICIO.");
+                    BeginSessionStop(reason, false, true, true);
+                }
+                return;
+            }
             else if (!connected && transportWasConnected)
             {
                 var interruptedLevelLoad = IsClient &&
@@ -1270,14 +1794,88 @@ namespace Coophead
                 hasRemoteContext = false;
                 hasPendingRemoteScene = false;
                 hasRemoteInputActivity = false;
+                ResetInputEpochForReconnect();
                 CancelSceneTransition("La conexión se interrumpió durante el cambio de escena.");
                 if (interruptedLevelLoad)
                 {
-                    StopSession();
+                    BeginSessionStop(TransportDisconnectReason.Normal,
+                        false, false);
                     returnToMapAfterAbortedLoad = true;
                 }
             }
             transportWasConnected = connected;
+        }
+
+        internal static bool InterceptPlayerTwoRemoval(PlayerId player)
+        {
+            if (player != PlayerId.PlayerTwo || !Enabled || internalPlayerLeave)
+                return false;
+
+            Plugin.Log.LogWarning("[SessionSync] Remover Player Two cierra la " +
+                "sesión completa para evitar que vuelva a aparecer.");
+            ShowSessionNotice("PLAYER TWO FUE REMOVIDO. REGRESANDO AL INICIO.");
+            BeginSessionStop(TransportDisconnectReason.RemovePlayer, true, true);
+            return true;
+        }
+
+        private static void ShowSessionNotice(string message)
+        {
+            sessionNotice = message ?? string.Empty;
+            sessionNoticeDeadline = Time.realtimeSinceStartup + 5f;
+        }
+
+        private static void TryReturnToStartAfterSession()
+        {
+            if (!returnToStartAfterSession || SceneLoader.CurrentlyLoading)
+                return;
+
+            var now = Time.realtimeSinceStartup;
+            if (now < returnToStartRetryNotBeforeRealtime)
+                return;
+
+            if (PreventLocalSave)
+            {
+                RestoreClientContext();
+                if (PreventLocalSave)
+                {
+                    returnToStartRetryNotBeforeRealtime = now +
+                        ReturnToStartRetrySeconds;
+                    return;
+                }
+            }
+
+            try
+            {
+                if (GoToStartScreenMethod == null)
+                    throw new System.MissingMethodException(
+                        "PlayerManager.goToStartScreen");
+                GoToStartScreenMethod.Invoke(null, null);
+                returnToStartAfterSession = false;
+                returnToStartRetryNotBeforeRealtime = 0f;
+                Plugin.Log.LogMessage("[SessionSync] Ambos juegos regresan al inicio.");
+            }
+            catch (System.Exception ex)
+            {
+                returnToStartRetryNotBeforeRealtime = now +
+                    ReturnToStartRetrySeconds;
+                var inner = ex.InnerException == null ? ex : ex.InnerException;
+                Plugin.Log.LogWarning("[SessionSync] No se pudo volver al inicio; " +
+                    "se reintentará: " + inner.Message);
+            }
+        }
+
+        private static void TryRestorePendingClientContext()
+        {
+            if (IsClientSession || !PreventLocalSave)
+                return;
+            var now = Time.realtimeSinceStartup;
+            if (now < clientRestoreRetryNotBeforeRealtime)
+                return;
+            clientRestoreRetryNotBeforeRealtime = now +
+                ReturnToStartRetrySeconds;
+            RestoreClientContext();
+            if (!PreventLocalSave)
+                clientRestoreRetryNotBeforeRealtime = 0f;
         }
 
         public static bool OnSceneLoadRequested(string sceneName)
@@ -1346,9 +1944,17 @@ namespace Coophead
             sceneTransitionStartedRealtime = Time.realtimeSinceStartup;
             sceneTransitionDifficulty = difficulty;
             remoteSceneLoadStarted = false;
+            remoteSceneLoadObservedTransitionId = 0;
+            remoteSameSceneReloadTransitionId = 0;
+            remoteMapAcceptDeadline = 0f;
+            mapLevelInteractionInputProbeActive = false;
+            playerTwoMapNeutralSinceRealtime = 0f;
+            localPlayerTwoSuperRequestAdvertiseDeadline = 0f;
             if (sceneName.StartsWith("scene_map_"))
                 mapBootstrapCompleted = false;
             levelPlayerOneBootstrapCompleted = false;
+            loadoutHealthAgreementReported = false;
+            loadoutHealthMismatchReported = false;
             ClearRemotePlayerState();
             received = new InputFrame();
             previousHeld = InputButtons.None;
@@ -1369,6 +1975,11 @@ namespace Coophead
                 Time.realtimeSinceStartup - sceneTransitionStartedRealtime < 0.25f ||
                 SceneManager.GetActiveScene().name != sceneTransitionTarget)
                 return;
+            if (IsClient &&
+                remoteSameSceneReloadTransitionId == sceneTransitionId &&
+                (!remoteSceneLoadStarted ||
+                remoteSceneLoadObservedTransitionId != sceneTransitionId))
+                return;
             if (sceneTransitionTarget.StartsWith("scene_level_") &&
                 (Level.Current == null || !Level.Current.Started))
                 return;
@@ -1380,6 +1991,8 @@ namespace Coophead
             sceneTransitionStartedRealtime = 0f;
             sceneTransitionDifficulty = (byte)Level.Mode.Normal;
             remoteSceneLoadStarted = false;
+            remoteSceneLoadObservedTransitionId = 0;
+            remoteSameSceneReloadTransitionId = 0;
             received = new InputFrame();
             remotePlayerOneInput = new InputFrame();
             previousHeld = InputButtons.None;
@@ -1412,7 +2025,15 @@ namespace Coophead
         {
             LevelLoadGate.OnSceneLoaded(sceneName);
             if (sceneTransitionActive && sceneName == sceneTransitionTarget)
+            {
                 Level.SetCurrentMode((Level.Mode)sceneTransitionDifficulty);
+                if (Enabled && IsClient && remoteSceneLoadStarted)
+                {
+                    remoteSceneLoadObservedTransitionId = sceneTransitionId;
+                    Plugin.Log.LogMessage("[SceneSync] Nueva generación observada para " +
+                        sceneName + " en transición #" + sceneTransitionId + ".");
+                }
+            }
             ClearRemotePlayerState();
             SlimeBossSynchronizer.Reset();
             levelPlayerOneBootstrapCompleted = false;
@@ -1443,6 +2064,8 @@ namespace Coophead
                 {
                     var cancellationMatches =
                         sceneTransitionTarget == command.SceneName ||
+                        (hasPendingRemoteScene &&
+                            pendingRemoteScene.SceneName == command.SceneName) ||
                         blockedClientSceneRequest == command.SceneName ||
                         SceneManager.GetActiveScene().name == command.SceneName;
                     if (!cancellationMatches)
@@ -1451,7 +2074,8 @@ namespace Coophead
                         (remoteSceneLoadStarted || SceneLoader.CurrentlyLoading ||
                             SceneManager.GetActiveScene().name == command.SceneName);
                     CancelSceneTransition("El host canceló la carga coordinada.");
-                    StopSession();
+                    BeginSessionStop(TransportDisconnectReason.Normal,
+                        true, false);
                     if (shouldReturnToMap)
                         returnToMapAfterAbortedLoad = true;
                     continue;
@@ -1461,17 +2085,47 @@ namespace Coophead
                     continue;
                 var targetAlreadyActive =
                     SceneManager.GetActiveScene().name == command.SceneName;
+                var startsNewTransition = command.IsCoordinatedTransition &&
+                    (!sceneTransitionActive || sceneTransitionId != command.Sequence);
+                var supersedesActiveLoader = startsNewTransition &&
+                    sceneTransitionActive &&
+                    (remoteSceneLoadStarted || SceneLoader.CurrentlyLoading);
                 Level.SetCurrentMode((Level.Mode)command.Difficulty);
-                if (command.IsCoordinatedTransition &&
-                    (!sceneTransitionActive || sceneTransitionId != command.Sequence))
+                if (supersedesActiveLoader)
+                {
+                    var supersededTransitionId = sceneTransitionId;
+                    var supersededTarget = sceneTransitionTarget;
+                    LevelLoadGate.ReleaseAndResetForSupersedingTransition(
+                        supersededTransitionId);
+                    if (deferredRemoteSceneTransitionId != command.Sequence)
+                    {
+                        deferredRemoteSceneReceivedRealtime =
+                            Time.realtimeSinceStartup;
+                        deferredRemoteSceneLoaderIdleFrame = -1;
+                    }
+                    deferredRemoteSceneTransitionId = command.Sequence;
+                    deferredRemoteSceneRequiresReload = targetAlreadyActive ||
+                        supersededTarget == command.SceneName;
+                    Plugin.Log.LogWarning("[SceneSync] Transición #" +
+                        command.Sequence + " quedó diferida hasta que el loader de #" +
+                        supersededTransitionId + " termine por completo.");
+                }
+                else if (startsNewTransition)
+                {
+                    ClearDeferredRemoteSceneTransition();
                     BeginSceneTransition(command.SceneName, command.LevelId,
                         command.Sequence, command.Difficulty, true);
+                    if (targetAlreadyActive)
+                    {
+                        remoteSameSceneReloadTransitionId = command.Sequence;
+                        Plugin.Log.LogMessage("[SceneSync] Recarga coordinada de " +
+                            command.SceneName + " requerida para transición #" +
+                            command.Sequence + ".");
+                    }
+                }
                 else if (!targetAlreadyActive && !command.IsCoordinatedTransition)
                     BeginSceneTransition(command.SceneName, command.LevelId,
                         command.Sequence, command.Difficulty, false);
-                if (targetAlreadyActive && command.IsCoordinatedTransition &&
-                    !SceneLoader.CurrentlyLoading)
-                    LevelLoadGate.AdoptAlreadyLoadedTransition(command.SceneName);
                 if (blockedClientSceneRequest == command.SceneName)
                 {
                     blockedClientSceneRequest = string.Empty;
@@ -1479,21 +2133,62 @@ namespace Coophead
                 }
                 pendingRemoteScene = command;
                 hasPendingRemoteScene = true;
-                if (RequiresSessionContext(command.SceneName) && !hasRemoteContext)
-                    Plugin.Log.LogMessage("[SceneSync] Esperando el save del host antes de cargar " +
+                if (!HasMatchingSessionContext(command))
+                    Plugin.Log.LogMessage("[SceneSync] Esperando el contexto #" +
+                        command.Sequence + " del host antes de cargar " +
                         command.SceneName + ".");
             }
 
             if (!hasPendingRemoteScene)
                 return;
-            if (SceneManager.GetActiveScene().name == pendingRemoteScene.SceneName)
+            if (deferredRemoteSceneTransitionId == pendingRemoteScene.Sequence)
+            {
+                if (SceneLoader.CurrentlyLoading)
+                {
+                    deferredRemoteSceneLoaderIdleFrame = -1;
+                    return;
+                }
+
+                // El plugin corre antes que varios callbacks de Unity. Exigimos un
+                // frame completo con el loader anterior inactivo para que ningún
+                // callback tardío de A pueda acreditar la generación B.
+                if (deferredRemoteSceneLoaderIdleFrame < 0)
+                {
+                    deferredRemoteSceneLoaderIdleFrame = Time.frameCount;
+                    return;
+                }
+                if (Time.frameCount <= deferredRemoteSceneLoaderIdleFrame)
+                    return;
+
+                var forceReload = deferredRemoteSceneRequiresReload;
+                var deferredCommand = pendingRemoteScene;
+                ClearDeferredRemoteSceneTransition();
+                BeginSceneTransition(deferredCommand.SceneName,
+                    deferredCommand.LevelId, deferredCommand.Sequence,
+                    deferredCommand.Difficulty, true);
+                if (forceReload || SceneManager.GetActiveScene().name ==
+                    deferredCommand.SceneName)
+                    remoteSameSceneReloadTransitionId = deferredCommand.Sequence;
+                Plugin.Log.LogMessage("[SceneSync] Loader anterior liberado; " +
+                    "comienza la generación real #" + deferredCommand.Sequence +
+                    " para " + deferredCommand.SceneName + ".");
+            }
+            var pendingTargetAlreadyActive =
+                SceneManager.GetActiveScene().name == pendingRemoteScene.SceneName;
+            var pendingRequiresSameSceneReload =
+                pendingRemoteScene.IsCoordinatedTransition &&
+                remoteSameSceneReloadTransitionId == pendingRemoteScene.Sequence;
+            var pendingGenerationObserved =
+                remoteSceneLoadObservedTransitionId == pendingRemoteScene.Sequence;
+            if (pendingTargetAlreadyActive &&
+                (!pendingRequiresSameSceneReload || pendingGenerationObserved))
             {
                 Plugin.Log.LogMessage("[SceneSync] Escena remota sincronizada: " +
                     pendingRemoteScene.SceneName + ".");
                 hasPendingRemoteScene = false;
                 return;
             }
-            if (RequiresSessionContext(pendingRemoteScene.SceneName) && !hasRemoteContext)
+            if (!HasMatchingSessionContext(pendingRemoteScene))
                 return;
             if (!SceneLoader.Exists || SceneLoader.CurrentlyLoading)
                 return;
@@ -1503,7 +2198,12 @@ namespace Coophead
 
         private static void ApplySceneCommand(SceneCommand command)
         {
-            if (SceneManager.GetActiveScene().name == command.SceneName)
+            var targetAlreadyActive =
+                SceneManager.GetActiveScene().name == command.SceneName;
+            var requiresSameSceneReload = command.IsCoordinatedTransition &&
+                remoteSameSceneReloadTransitionId == command.Sequence;
+            if ((targetAlreadyActive && !requiresSameSceneReload) ||
+                remoteSceneLoadStarted)
                 return;
             try
             {
@@ -1520,6 +2220,16 @@ namespace Coophead
         private static bool RequiresSessionContext(string sceneName)
         {
             return sceneName != "scene_title" && sceneName != "scene_slot_select";
+        }
+
+        private static bool HasMatchingSessionContext(SceneCommand command)
+        {
+            if (!RequiresSessionContext(command.SceneName))
+                return true;
+            if (!hasRemoteContext)
+                return false;
+            return !command.IsCoordinatedTransition ||
+                latestRemoteContext.LoadTransitionId == command.Sequence;
         }
 
         private static void LoadRemoteScene(SceneCommand command)
@@ -1547,12 +2257,12 @@ namespace Coophead
                 }
                 if (canLoadAsLevel)
                 {
+                    remoteSceneLoadStarted = true;
                     SceneLoader.LoadLevel(
                         (Levels)command.LevelId,
                         SceneLoader.Transition.Fade,
                         SceneLoader.Icon.Hourglass,
                         null);
-                    remoteSceneLoadStarted = true;
                     Plugin.Log.LogMessage("[SceneSync] Cuphead cargando nivel remoto " +
                         command.LevelId + " en dificultad " + command.Difficulty +
                         " (transición #" + command.Sequence + ").");
@@ -1563,13 +2273,13 @@ namespace Coophead
                     throw new System.ArgumentException("Escena desconocida: " + sceneName);
                 var scene = (Scenes)System.Enum.Parse(typeof(Scenes), sceneName);
 
+                remoteSceneLoadStarted = true;
                 SceneLoader.LoadScene(
                     scene,
                     SceneLoader.Transition.Fade,
                     SceneLoader.Transition.Fade,
                     SceneLoader.Icon.Hourglass,
                     null);
-                remoteSceneLoadStarted = true;
                 Plugin.Log.LogMessage("[SceneSync] Cuphead cargando escena remota " +
                     sceneName + ".");
             }
@@ -1620,13 +2330,37 @@ namespace Coophead
 
         private static void UpdatePendingSceneCommandWatchdog()
         {
-            if (!IsClient || !sceneTransitionActive || !hasPendingRemoteScene ||
-                remoteSceneLoadStarted ||
-                Time.realtimeSinceStartup - sceneTransitionStartedRealtime <
+            if (!IsClient || !hasPendingRemoteScene)
+                return;
+
+            var pendingTransitionId = pendingRemoteScene.Sequence;
+            if (pendingTransitionId != 0 &&
+                remoteSceneLoadObservedTransitionId == pendingTransitionId)
+                return;
+
+            float watchdogStartedRealtime;
+            if (deferredRemoteSceneTransitionId == pendingTransitionId)
+                watchdogStartedRealtime = deferredRemoteSceneReceivedRealtime;
+            else if (sceneTransitionActive &&
+                sceneTransitionId == pendingTransitionId)
+                watchdogStartedRealtime = sceneTransitionStartedRealtime;
+            else
+                return;
+            if (watchdogStartedRealtime <= 0f ||
+                Time.realtimeSinceStartup - watchdogStartedRealtime <
                     PendingSceneCommandTimeoutSeconds)
                 return;
 
-            CancelSceneTransition("No fue posible iniciar la escena indicada por el host.");
+            CancelSceneTransition("No se observó la generación de escena indicada " +
+                "por el host antes del timeout.");
+        }
+
+        private static void ClearDeferredRemoteSceneTransition()
+        {
+            deferredRemoteSceneTransitionId = 0;
+            deferredRemoteSceneRequiresReload = false;
+            deferredRemoteSceneReceivedRealtime = 0f;
+            deferredRemoteSceneLoaderIdleFrame = -1;
         }
 
         private static void CancelSceneTransition(string reason)
@@ -1643,6 +2377,9 @@ namespace Coophead
             sceneTransitionStartedRealtime = 0f;
             sceneTransitionDifficulty = (byte)Level.Mode.Normal;
             remoteSceneLoadStarted = false;
+            remoteSceneLoadObservedTransitionId = 0;
+            remoteSameSceneReloadTransitionId = 0;
+            ClearDeferredRemoteSceneTransition();
             pendingRemoteScene = default(SceneCommand);
             hasPendingRemoteScene = false;
             blockedClientSceneRequest = string.Empty;
@@ -1670,6 +2407,23 @@ namespace Coophead
             {
                 var data = PlayerData.Data;
                 var hasActiveSave = data != null && PlayerData.inGame;
+                var playerOneLoadout = default(PlayerLoadoutSnapshot);
+                var playerTwoLoadout = default(PlayerLoadoutSnapshot);
+                if (hasActiveSave)
+                {
+                    if (data.Loadouts == null || data.Loadouts.playerOne == null ||
+                        data.Loadouts.playerTwo == null)
+                        throw new System.InvalidOperationException(
+                            "El save activo no contiene loadouts.");
+                    playerOneLoadout = CaptureLoadout(data.Loadouts.playerOne);
+                    playerTwoLoadout = hostPlayerTwoLoadoutOverlay != null ?
+                        CaptureLoadout(hostPlayerTwoLoadoutOverlay) :
+                        CaptureLoadout(data.Loadouts.playerTwo);
+                    if (!IsValidLoadout(playerOneLoadout) ||
+                        !IsValidLoadout(playerTwoLoadout))
+                        throw new System.InvalidOperationException(
+                            "El save activo contiene un loadout desconocido.");
+                }
                 var context = new SessionContext
                 {
                     SaveSlot = (byte)UnityEngine.Mathf.Clamp(PlayerData.CurrentSaveFileIndex, 0, 2),
@@ -1685,6 +2439,10 @@ namespace Coophead
                     CurrentMap = hasActiveSave ? (int)data.CurrentMap : -1,
                     CurrentLevel = Level.Current == null ? -1 : (int)Level.Current.CurrentLevel,
                     LoadTransitionId = LevelLoadGate.TransitionId,
+                    GuestLoadoutRevision = hasRemoteGuestLoadout ?
+                        remoteGuestLoadoutRevision : 0,
+                    PlayerOneLoadout = playerOneLoadout,
+                    PlayerTwoLoadout = playerTwoLoadout,
                 };
 
                 if (!force && hasLastSentContext && ContextEquals(context, lastSentContext) &&
@@ -1698,7 +2456,8 @@ namespace Coophead
                     " map=" + context.CurrentMap + " level=" + context.CurrentLevel +
                     " transition=" + context.LoadTransitionId +
                     " suspended=" + context.SessionSuspended + " resume=" +
-                    context.ResumeSeconds);
+                    context.ResumeSeconds + " loadoutGuest=" +
+                    context.GuestLoadoutRevision);
             }
             catch (System.Exception ex)
             {
@@ -1711,11 +2470,17 @@ namespace Coophead
             if (!IsClient)
                 return;
             if (!originalClientContextCaptured)
+            {
                 CaptureOriginalClientContext();
+                if (!originalClientContextCaptured)
+                    return;
+            }
 
             SessionContext context;
             while (transport.TryReceiveContext(out context))
             {
+                if (!hasLocalGuestLoadout)
+                    TryCaptureLocalGuestLoadout();
                 Plugin.Log.LogMessage("[SessionSync] Contexto recibido #" + context.Sequence +
                     ": slot=" + context.SaveSlot + " mugman=" + context.PlayerOneIsMugman +
                     " difficulty=" + context.Difficulty + " map=" + context.CurrentMap +
@@ -1737,7 +2502,10 @@ namespace Coophead
                 try
                 {
                     var firstSessionContext = !hasRemoteContext;
+                    CaptureClientSlotState(context.SaveSlot);
                     var data = PlayerData.GetDataForSlot(context.SaveSlot);
+                    if (!ApplyClientSessionLoadouts(context))
+                        continue;
                     PlayerData.CurrentSaveFileIndex = context.SaveSlot;
                     PlayerManager.player1IsMugman = context.PlayerOneIsMugman;
                     data.isPlayer1Mugman = context.PlayerOneIsMugman;
@@ -1775,6 +2543,7 @@ namespace Coophead
                 originalClientSavePlayerOneIsMugman = data.isPlayer1Mugman;
                 originalClientDifficulty = Level.CurrentMode;
                 originalClientInGame = PlayerData.inGame;
+                originalClientDialoguerState = Dialoguer.GetGlobalVariablesState();
                 originalClientContextCaptured = true;
             }
             catch
@@ -1785,22 +2554,87 @@ namespace Coophead
 
         private static void RestoreClientContext()
         {
-            if (!originalClientContextCaptured)
+            if (!originalClientContextCaptured &&
+                !HasCapturedClientSlotState())
                 return;
-            try
+
+            RestoreClientSaveData();
+            if (originalClientContextCaptured)
             {
-                PlayerData.CurrentSaveFileIndex = originalClientSaveSlot;
-                PlayerManager.player1IsMugman = originalClientPlayerOneIsMugman;
-                PlayerData.GetDataForSlot(originalClientSaveSlot).isPlayer1Mugman =
-                    originalClientSavePlayerOneIsMugman;
-                Level.SetCurrentMode(originalClientDifficulty);
-                PlayerData.inGame = originalClientInGame;
+                try
+                {
+                    PlayerData.CurrentSaveFileIndex = originalClientSaveSlot;
+                    PlayerManager.player1IsMugman = originalClientPlayerOneIsMugman;
+                    PlayerData.GetDataForSlot(originalClientSaveSlot).isPlayer1Mugman =
+                        originalClientSavePlayerOneIsMugman;
+                    Level.SetCurrentMode(originalClientDifficulty);
+                    PlayerData.inGame = originalClientInGame;
+                    Dialoguer.SetGlobalVariablesState(originalClientDialoguerState);
+                    originalClientDialoguerState = null;
+                    originalClientContextCaptured = false;
+                }
+                catch (System.Exception ex)
+                {
+                    // Conserva el snapshot para volver a intentarlo durante shutdown.
+                    Plugin.Log.LogWarning("[SaveSync] No se pudo restaurar el " +
+                        "contexto global del invitado: " + ex.Message);
+                }
             }
-            catch
+        }
+
+        private static void CaptureClientSlotState(int slot)
+        {
+            if (slot < 0 || slot >= clientSlotStateCaptured.Length ||
+                clientSlotStateCaptured[slot])
+                return;
+
+            var data = PlayerData.GetDataForSlot(slot);
+            if (data == null)
+                throw new System.InvalidOperationException(
+                    "No existe el slot local que se iba a prestar.");
+            var json = JsonUtility.ToJson(data);
+            if (string.IsNullOrEmpty(json))
+                throw new System.InvalidOperationException(
+                    "No se pudo respaldar el slot local antes de la sesión.");
+            clientSlotOriginalJson[slot] = json;
+            clientSlotStateCaptured[slot] = true;
+            Plugin.Log.LogInfo("[SaveSync] Slot local " + (slot + 1) +
+                " respaldado en memoria para restaurarlo al salir.");
+        }
+
+        private static void RestoreClientSaveData()
+        {
+            for (var slot = 0; slot < clientSlotStateCaptured.Length; slot++)
             {
-                // El juego puede estar cerrándose y haber destruido sus singletons.
+                if (!clientSlotStateCaptured[slot])
+                    continue;
+                try
+                {
+                    var data = PlayerData.GetDataForSlot(slot);
+                    if (data == null)
+                        throw new System.InvalidOperationException(
+                            "El slot dejó de estar disponible.");
+                    JsonUtility.FromJsonOverwrite(clientSlotOriginalJson[slot], data);
+                    clientSlotStateCaptured[slot] = false;
+                    clientSlotOriginalJson[slot] = null;
+                    Plugin.Log.LogMessage("[SaveSync] Slot local " + (slot + 1) +
+                        " restaurado; el progreso remoto no quedó en memoria.");
+                }
+                catch (System.Exception ex)
+                {
+                    // No borra el snapshot: OnDestroy volverá a intentar restaurarlo.
+                    Plugin.Log.LogWarning("[SaveSync] No se pudo restaurar el slot " +
+                        (slot + 1) + ": " + ex.Message);
+                }
             }
-            originalClientContextCaptured = false;
+        }
+
+        private static bool HasCapturedClientSlotState()
+        {
+            for (var slot = 0; slot < clientSlotStateCaptured.Length; slot++)
+                if (clientSlotStateCaptured[slot])
+                    return true;
+            return false;
         }
 
         private static void TryLeavePlayerTwo()
@@ -1852,7 +2686,237 @@ namespace Coophead
                 left.ResumeSeconds == right.ResumeSeconds &&
                 left.CurrentMap == right.CurrentMap &&
                 left.CurrentLevel == right.CurrentLevel &&
-                left.LoadTransitionId == right.LoadTransitionId;
+                left.LoadTransitionId == right.LoadTransitionId &&
+                left.GuestLoadoutRevision == right.GuestLoadoutRevision &&
+                left.PlayerOneLoadout.SameAs(right.PlayerOneLoadout) &&
+                left.PlayerTwoLoadout.SameAs(right.PlayerTwoLoadout);
+        }
+
+        private static void TryCaptureLocalGuestLoadout()
+        {
+            if (!IsClient || hasLocalGuestLoadout)
+                return;
+
+            try
+            {
+                var slot = originalClientContextCaptured ?
+                    originalClientSaveSlot : PlayerData.CurrentSaveFileIndex;
+                slot = Mathf.Clamp(slot, 0, 2);
+                var data = PlayerData.GetDataForSlot(slot);
+                var source = data == null || data.Loadouts == null ? null :
+                    data.Loadouts.playerOne;
+                if (source == null)
+                    return;
+
+                var snapshot = CaptureLoadout(source);
+                if (!IsValidLoadout(snapshot))
+                    return;
+
+                localGuestLoadout = snapshot;
+                localGuestLoadoutRevision = 1;
+                hasLocalGuestLoadout = true;
+                Plugin.Log.LogMessage("[LoadoutSync] El invitado ofrece su " +
+                    "equipamiento local P1 como P2 (slot local=" +
+                    (slot + 1) + ", arma=" + snapshot.PrimaryWeapon +
+                    ", charm=" + snapshot.Charm + ").");
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogDebug("[LoadoutSync] El equipamiento local aún " +
+                    "no está disponible: " + ex.Message);
+            }
+        }
+
+        private static void AttachLocalGuestLoadout(ref InputFrame frame)
+        {
+            if (!hasLocalGuestLoadout)
+                return;
+            frame.GuestLoadoutRevision = localGuestLoadoutRevision;
+            frame.GuestLoadout = localGuestLoadout;
+        }
+
+        private static void AcceptRemoteGuestLoadout(InputFrame frame)
+        {
+            if (!IsHost || frame.GuestLoadoutRevision == 0 ||
+                !IsValidLoadout(frame.GuestLoadout))
+                return;
+
+            if (hasRemoteGuestLoadout)
+            {
+                if (frame.GuestLoadoutRevision == remoteGuestLoadoutRevision)
+                    return;
+                if (!IsNewerTick(frame.GuestLoadoutRevision,
+                    remoteGuestLoadoutRevision))
+                    return;
+            }
+            else if (remoteGuestLoadoutRevision != 0)
+            {
+                if (frame.GuestLoadoutRevision == remoteGuestLoadoutRevision)
+                {
+                    // Una época nueva vuelve a confirmar el snapshot negociado,
+                    // pero no debe reemplazar el mismo objeto: Cuphead puede haber
+                    // ajustado ahí el super de Chalice o cambios hechos en sesión.
+                    hasRemoteGuestLoadout = true;
+                    if (!frame.GuestLoadout.SameAs(remoteGuestLoadout))
+                    {
+                        remoteGuestLoadout = frame.GuestLoadout;
+                        UpdateLoadoutOverlay(ref hostPlayerTwoLoadoutOverlay,
+                            remoteGuestLoadout);
+                    }
+                    Plugin.Log.LogMessage("[LoadoutSync] El invitado revalidó " +
+                        "el equipamiento P2 para la nueva época de input.");
+                    CaptureAndSendContext(true);
+                    return;
+                }
+                if (!IsNewerTick(frame.GuestLoadoutRevision,
+                    remoteGuestLoadoutRevision))
+                    return;
+            }
+
+            remoteGuestLoadout = frame.GuestLoadout;
+            remoteGuestLoadoutRevision = frame.GuestLoadoutRevision;
+            hasRemoteGuestLoadout = true;
+            UpdateLoadoutOverlay(ref hostPlayerTwoLoadoutOverlay,
+                remoteGuestLoadout);
+            Plugin.Log.LogMessage("[LoadoutSync] El host aceptó el equipamiento " +
+                "del invitado para P2 (revisión=" +
+                remoteGuestLoadoutRevision + ", arma=" +
+                remoteGuestLoadout.PrimaryWeapon + ", charm=" +
+                remoteGuestLoadout.Charm + ").");
+            CaptureAndSendContext(true);
+        }
+
+        private static PlayerLoadoutSnapshot CaptureLoadout(
+            PlayerData.PlayerLoadouts.PlayerLoadout loadout)
+        {
+            var flags = PlayerLoadoutFlags.None;
+            if (loadout.HasEquippedSecondaryRegularWeapon)
+                flags |= PlayerLoadoutFlags.HasEquippedSecondaryRegularWeapon;
+            if (loadout.HasEquippedSecondarySHMUPWeapon)
+                flags |= PlayerLoadoutFlags.HasEquippedSecondaryShmupWeapon;
+            if (loadout.MustNotifySwitchRegularWeapon)
+                flags |= PlayerLoadoutFlags.MustNotifySwitchRegularWeapon;
+            if (loadout.MustNotifySwitchSHMUPWeapon)
+                flags |= PlayerLoadoutFlags.MustNotifySwitchShmupWeapon;
+            return new PlayerLoadoutSnapshot
+            {
+                PrimaryWeapon = (int)loadout.primaryWeapon,
+                SecondaryWeapon = (int)loadout.secondaryWeapon,
+                Super = (int)loadout.super,
+                Charm = (int)loadout.charm,
+                Flags = flags,
+            };
+        }
+
+        private static bool IsValidLoadout(PlayerLoadoutSnapshot loadout)
+        {
+            return System.Enum.IsDefined(typeof(Weapon), loadout.PrimaryWeapon) &&
+                (Weapon)loadout.PrimaryWeapon != Weapon.None &&
+                System.Enum.IsDefined(typeof(Weapon), loadout.SecondaryWeapon) &&
+                System.Enum.IsDefined(typeof(Super), loadout.Super) &&
+                System.Enum.IsDefined(typeof(Charm), loadout.Charm) &&
+                (loadout.Flags & ~(PlayerLoadoutFlags.
+                    HasEquippedSecondaryRegularWeapon |
+                    PlayerLoadoutFlags.HasEquippedSecondaryShmupWeapon |
+                    PlayerLoadoutFlags.MustNotifySwitchRegularWeapon |
+                    PlayerLoadoutFlags.MustNotifySwitchShmupWeapon)) == 0;
+        }
+
+        private static void UpdateLoadoutOverlay(
+            ref PlayerData.PlayerLoadouts.PlayerLoadout overlay,
+            PlayerLoadoutSnapshot snapshot)
+        {
+            if (overlay == null)
+                overlay = new PlayerData.PlayerLoadouts.PlayerLoadout();
+            overlay.primaryWeapon = (Weapon)snapshot.PrimaryWeapon;
+            overlay.secondaryWeapon = (Weapon)snapshot.SecondaryWeapon;
+            overlay.super = (Super)snapshot.Super;
+            overlay.charm = (Charm)snapshot.Charm;
+            overlay.HasEquippedSecondaryRegularWeapon =
+                (snapshot.Flags & PlayerLoadoutFlags.
+                    HasEquippedSecondaryRegularWeapon) != 0;
+            overlay.HasEquippedSecondarySHMUPWeapon =
+                (snapshot.Flags & PlayerLoadoutFlags.
+                    HasEquippedSecondaryShmupWeapon) != 0;
+            overlay.MustNotifySwitchRegularWeapon =
+                (snapshot.Flags & PlayerLoadoutFlags.
+                    MustNotifySwitchRegularWeapon) != 0;
+            overlay.MustNotifySwitchSHMUPWeapon =
+                (snapshot.Flags & PlayerLoadoutFlags.
+                    MustNotifySwitchShmupWeapon) != 0;
+        }
+
+        private static bool ApplyClientSessionLoadouts(SessionContext context)
+        {
+            if (!IsValidLoadout(context.PlayerOneLoadout) ||
+                !IsValidLoadout(context.PlayerTwoLoadout))
+            {
+                Plugin.Log.LogWarning("[LoadoutSync] El contexto contenía un " +
+                    "equipamiento desconocido; no se aplicará.");
+                return false;
+            }
+
+            UpdateLoadoutOverlay(ref clientPlayerOneLoadoutOverlay,
+                context.PlayerOneLoadout);
+            UpdateLoadoutOverlay(ref clientPlayerTwoLoadoutOverlay,
+                context.PlayerTwoLoadout);
+            hasClientPlayerOneLoadoutOverlay = true;
+            hasClientPlayerTwoLoadoutOverlay = true;
+            return true;
+        }
+
+        internal static bool TryGetSessionLoadout(PlayerId player,
+            out PlayerData.PlayerLoadouts.PlayerLoadout loadout)
+        {
+            loadout = null;
+            if (!Enabled)
+                return false;
+            if (IsHost && player == PlayerId.PlayerTwo &&
+                hostPlayerTwoLoadoutOverlay != null)
+            {
+                loadout = hostPlayerTwoLoadoutOverlay;
+                return true;
+            }
+            if (!IsClient)
+                return false;
+            if (player == PlayerId.PlayerOne &&
+                hasClientPlayerOneLoadoutOverlay &&
+                clientPlayerOneLoadoutOverlay != null)
+            {
+                loadout = clientPlayerOneLoadoutOverlay;
+                return true;
+            }
+            if (player == PlayerId.PlayerTwo &&
+                hasClientPlayerTwoLoadoutOverlay &&
+                clientPlayerTwoLoadoutOverlay != null)
+            {
+                loadout = clientPlayerTwoLoadoutOverlay;
+                return true;
+            }
+            return false;
+        }
+
+        private static void ResetRemoteGuestLoadout(bool discardOverlay)
+        {
+            hasRemoteGuestLoadout = false;
+            if (discardOverlay)
+            {
+                remoteGuestLoadout = default(PlayerLoadoutSnapshot);
+                remoteGuestLoadoutRevision = 0;
+                hostPlayerTwoLoadoutOverlay = null;
+            }
+        }
+
+        private static void ResetSessionLoadouts()
+        {
+            localGuestLoadout = default(PlayerLoadoutSnapshot);
+            localGuestLoadoutRevision = 0;
+            hasLocalGuestLoadout = false;
+            ResetRemoteGuestLoadout(true);
+            clientPlayerOneLoadoutOverlay = null;
+            clientPlayerTwoLoadoutOverlay = null;
+            hasClientPlayerOneLoadoutOverlay = false;
+            hasClientPlayerTwoLoadoutOverlay = false;
         }
 
         private static void CaptureAndSendPlayerState()
@@ -1873,6 +2937,9 @@ namespace Coophead
                 PlayerOneReleased = hostPlayerOneInput.Released,
                 PlayerOneSuperActionSequence =
                     hostPlayerOneSuperActionSequence,
+                PlayerTwoSuperActionSequence =
+                    hostPlayerTwoSuperActionSequence,
+                StateSessionNonce = localStateSessionNonce,
             };
             if (Level.Current != null && Level.Current.Started)
                 state.Flags |= PlayerStateFlags.GameplayStarted;
@@ -1902,9 +2969,14 @@ namespace Coophead
 
         private static void CaptureHostPlayerOneInput()
         {
-            if (!transport.IsConnected)
+            if (!transport.IsConnected || LocalPhysicalInputBlocked)
             {
-                hostPlayerOneInput = new InputFrame { Tick = sourceTick };
+                hostPlayerOneInput = new InputFrame
+                {
+                    Tick = sourceTick,
+                    Released = transport.IsConnected && LocalPhysicalInputBlocked ?
+                        previousHostPlayerOneHeld : InputButtons.None,
+                };
                 previousHostPlayerOneHeld = InputButtons.None;
                 return;
             }
@@ -1914,7 +2986,6 @@ namespace Coophead
             {
                 var sampled = new InputFrame { Tick = sourceTick };
                 MergeConfiguredPlayer(PlayerId.PlayerOne, ref sampled);
-                MergeInput(ref sampled, SampleUnityFallbackInput());
                 if (IsGameplayInputLocked())
                 {
                     previousHostPlayerOneHeld = sampled.Held;
@@ -1969,28 +3040,54 @@ namespace Coophead
             if (player.stats != null)
             {
                 if (id == PlayerId.PlayerOne)
+                {
+                    state.PlayerOneHealthMax = (byte)Mathf.Clamp(
+                        player.stats.HealthMax, 0, 255);
                     state.PlayerOneSuperMeter = player.stats.SuperMeter;
+                }
                 else
+                {
+                    state.PlayerTwoHealthMax = (byte)Mathf.Clamp(
+                        player.stats.HealthMax, 0, 255);
                     state.PlayerTwoSuperMeter = player.stats.SuperMeter;
+                }
             }
 
             var levelPlayer = player as LevelPlayerController;
             var motor = levelPlayer == null ? null : levelPlayer.motor;
-            if (motor == null)
-                return;
             var motionFlags = PlayerMotionFlags.None;
-            if (motor.Dashing)
-                motionFlags |= PlayerMotionFlags.Dashing;
-            if (motor.IsHit)
-                motionFlags |= PlayerMotionFlags.Hit;
-            if (motor.IsUsingSuperOrEx)
-                motionFlags |= PlayerMotionFlags.UsingSuperOrEx;
+            if (IsPlayerReviving(player))
+                motionFlags |= PlayerMotionFlags.Reviving;
+            if (motor != null)
+            {
+                if (motor.Dashing)
+                    motionFlags |= PlayerMotionFlags.Dashing;
+                if (motor.IsHit)
+                    motionFlags |= PlayerMotionFlags.Hit;
+                if (motor.IsUsingSuperOrEx)
+                    motionFlags |= PlayerMotionFlags.UsingSuperOrEx;
+            }
             if (id == PlayerId.PlayerOne)
                 state.PlayerOneMotionFlags = motionFlags;
             else
             {
                 state.PlayerTwoMotionFlags = motionFlags;
-                state.PlayerTwoHitDirection = CaptureHitDirection(motor);
+                if (motor != null)
+                    state.PlayerTwoHitDirection = CaptureHitDirection(motor);
+            }
+        }
+
+        private static bool IsPlayerReviving(AbstractPlayerController player)
+        {
+            if (player == null || PlayerIsRevivingField == null)
+                return false;
+            try
+            {
+                return (bool)PlayerIsRevivingField.GetValue(player);
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -2035,6 +3132,9 @@ namespace Coophead
             PlayerStateSnapshot state;
             while (transport.TryReceivePlayerState(out state))
             {
+                if (state.StateSessionNonce != 0 &&
+                    state.StateSessionNonce != lastRemoteStateSessionNonce)
+                    BaselineRemoteStateEpoch(state);
                 if (hasRemotePlayerStateTick &&
                     !IsNewerTick(state.Tick, lastRemotePlayerStateTick))
                     continue;
@@ -2042,6 +3142,7 @@ namespace Coophead
                     continue;
                 latestRemotePlayerState = state;
                 latestRemotePlayerStateScene = SceneManager.GetActiveScene().name;
+                BufferRemotePlayerState(state);
                 var pressed = state.PlayerOnePressed |
                     (state.PlayerOneHeld & ~previousRemotePlayerOneHeld);
                 var released = state.PlayerOneReleased |
@@ -2062,6 +3163,38 @@ namespace Coophead
                     remotePlayerOneSuperDeferralDeadline =
                         Time.realtimeSinceStartup +
                         RemotePlayerOneSuperDeferralSeconds;
+                }
+                if (state.PlayerTwoSuperActionSequence != 0 &&
+                    (!hasRemotePlayerTwoSuperActionSequence ||
+                        IsNewerTick(state.PlayerTwoSuperActionSequence,
+                            lastRemotePlayerTwoSuperActionSequence)))
+                {
+                    lastRemotePlayerTwoSuperActionSequence =
+                        state.PlayerTwoSuperActionSequence;
+                    hasRemotePlayerTwoSuperActionSequence = true;
+                    if (state.PlayerTwoSuperActionSequence ==
+                        localPlayerTwoSuperRequestSequence)
+                        localPlayerTwoSuperRequestAdvertiseDeadline = 0f;
+                    if (localPredictedPlayerTwoSuperRequests.Remove(
+                        state.PlayerTwoSuperActionSequence))
+                    {
+                        Plugin.Log.LogInfo("[StateSync] El host confirmó el " +
+                            "EX/Super P2 ya predicho por el invitado (#" +
+                            state.PlayerTwoSuperActionSequence + ").");
+                    }
+                    else
+                    {
+                        RemoveQueuedSequence(localPlayerTwoSuperDispatchQueue,
+                            state.PlayerTwoSuperActionSequence);
+                        playerTwoConfirmedSuperQueue.Enqueue(
+                            state.PlayerTwoSuperActionSequence);
+                        remotePlayerTwoSuperDeferralDeadline =
+                            Time.realtimeSinceStartup +
+                            RemotePlayerTwoSuperDeferralSeconds;
+                        Plugin.Log.LogInfo("[StateSync] El host confirmó " +
+                            "EX/Super P2; se reproducirá el pulso faltante (#" +
+                            state.PlayerTwoSuperActionSequence + ").");
+                    }
                 }
                 previousRemotePlayerOneHeld = state.PlayerOneHeld;
                 remotePlayerOneInput.Tick = state.Tick;
@@ -2120,11 +3253,11 @@ namespace Coophead
             {
                 var firstLevelCorrection = onLevel &&
                     !levelPlayerOneBootstrapCompleted;
-                CorrectPlayerPosition(PlayerId.PlayerOne,
-                    latestRemotePlayerState.PlayerOneX, latestRemotePlayerState.PlayerOneY,
-                    firstLevelCorrection);
                 if (firstLevelCorrection)
                 {
+                    CorrectPlayerPosition(PlayerId.PlayerOne,
+                        latestRemotePlayerState.PlayerOneX,
+                        latestRemotePlayerState.PlayerOneY, true);
                     levelPlayerOneBootstrapCompleted = true;
                     Plugin.Log.LogMessage("[StateSync] Player One remoto alineado al iniciar " +
                         "el combate.");
@@ -2132,32 +3265,96 @@ namespace Coophead
             }
             if ((latestRemotePlayerState.PresentMask & 2) != 0)
             {
-                // P2 pertenece al invitado y se simula localmente. El snapshot del
-                // host ya recorrió cliente -> host -> cliente, así que usarlo como
-                // corrección continua rebobina cada dash aproximadamente un RTT.
-                // Sólo se usa para colocar al actor una vez al abrir el nivel; la
-                // reconciliación continua futura necesitará ACK + replay de inputs.
-                var firstLevelCorrection = onLevel &&
-                    !levelPlayerTwoBootstrapCompleted;
-                if (firstLevelCorrection)
+                if (Map.Current != null)
                 {
-                    CorrectPlayerPosition(PlayerId.PlayerTwo,
-                        latestRemotePlayerState.PlayerTwoX,
-                        latestRemotePlayerState.PlayerTwoY, true);
-                    levelPlayerTwoBootstrapCompleted = true;
+                    // El mapa del invitado es sólo una representación. Movimiento,
+                    // colisiones e interacciones se resuelven en el host y ambos
+                    // actores se dibujan desde el buffer de snapshots en LateUpdate.
                     ResetPlayerTwoStallFallback();
                 }
-                UpdatePlayerTwoStallFallback();
-                if (!p2PredictionIsolationReported)
+                else
                 {
-                    p2PredictionIsolationReported = true;
-                    Plugin.Log.LogInfo("[StateSync] P2 queda bajo predicción local; " +
-                        "el host sólo interviene si detectamos que quedó inmóvil.");
+                    // P2 pertenece al invitado y se simula localmente. El snapshot
+                    // del host ya recorrió cliente -> host -> cliente, así que
+                    // corregirlo continuamente rebobinaría cada dash un RTT.
+                    var firstLevelCorrection = onLevel &&
+                        !levelPlayerTwoBootstrapCompleted;
+                    if (firstLevelCorrection)
+                    {
+                        CorrectPlayerPosition(PlayerId.PlayerTwo,
+                            latestRemotePlayerState.PlayerTwoX,
+                            latestRemotePlayerState.PlayerTwoY, true);
+                        levelPlayerTwoBootstrapCompleted = true;
+                        ResetPlayerTwoStallFallback();
+                    }
+                    UpdatePlayerTwoStallFallback();
+                    if (!p2PredictionIsolationReported)
+                    {
+                        p2PredictionIsolationReported = true;
+                        Plugin.Log.LogInfo("[StateSync] P2 queda bajo predicción local; " +
+                            "el host sólo interviene si detectamos que quedó inmóvil.");
+                    }
                 }
             }
 
+            ReportLoadoutHealthAgreement(latestRemotePlayerState);
             SlimeBossSynchronizer.ApplyAuthoritativePlayerState(
                 latestRemotePlayerState);
+        }
+
+        private static void ReportLoadoutHealthAgreement(
+            PlayerStateSnapshot state)
+        {
+            if (Level.Current == null || !Level.Current.Started)
+                return;
+
+            var compared = 0;
+            var mismatch = false;
+            try
+            {
+                if ((state.PresentMask & 1) != 0 &&
+                    state.PlayerOneHealthMax != 0)
+                {
+                    var player = PlayerManager.GetPlayer(PlayerId.PlayerOne);
+                    if (player != null && player.stats != null)
+                    {
+                        compared++;
+                        mismatch |= player.stats.HealthMax !=
+                            state.PlayerOneHealthMax;
+                    }
+                }
+                if ((state.PresentMask & 2) != 0 &&
+                    state.PlayerTwoHealthMax != 0)
+                {
+                    var player = PlayerManager.GetPlayer(PlayerId.PlayerTwo);
+                    if (player != null && player.stats != null)
+                    {
+                        compared++;
+                        mismatch |= player.stats.HealthMax !=
+                            state.PlayerTwoHealthMax;
+                    }
+                }
+            }
+            catch
+            {
+                return;
+            }
+
+            if (mismatch && !loadoutHealthMismatchReported)
+            {
+                loadoutHealthMismatchReported = true;
+                Plugin.Log.LogWarning("[LoadoutSync] La vida máxima local no " +
+                    "coincide con el host (host P1=" + state.PlayerOneHealthMax +
+                    ", P2=" + state.PlayerTwoHealthMax + ").");
+            }
+            else if (!mismatch && compared == 2 &&
+                !loadoutHealthAgreementReported)
+            {
+                loadoutHealthAgreementReported = true;
+                Plugin.Log.LogMessage("[LoadoutSync] Vida máxima verificada en " +
+                    "ambas PCs (P1=" + state.PlayerOneHealthMax + ", P2=" +
+                    state.PlayerTwoHealthMax + ").");
+            }
         }
 
         private static void ClearRemotePlayerState()
@@ -2173,6 +3370,16 @@ namespace Coophead
             hasRemotePlayerState = false;
             lastRemotePlayerStateRealtime = 0f;
             remotePlayerOneSuperDeferralDeadline = 0f;
+            remotePlayerTwoSuperDeferralDeadline = 0f;
+            ClearPlayerTwoSuperRequestQueues();
+            playerTwoMapNeutralSinceRealtime = 0f;
+            remotePlayerStateBuffer.Clear();
+            lastBufferedPlayerStateRealtime = 0f;
+            maxBufferedPlayerStateGap = 0f;
+            maxPlayerOneRenderError = 0f;
+            maxPlayerTwoRenderError = 0f;
+            lastRenderTelemetryRealtime = 0f;
+            authoritativeMapRenderReported = false;
             ResetPlayerTwoStallFallback();
         }
 
@@ -2216,6 +3423,7 @@ namespace Coophead
             {
                 if (PlayerData.Data != null)
                 {
+                    CaptureClientSlotState(PlayerData.CurrentSaveFileIndex);
                     PlayerData.Data.CurrentMapData.playerOnePosition = playerOnePosition;
                     PlayerData.Data.CurrentMapData.playerTwoPosition = playerTwoPosition;
                 }
@@ -2243,6 +3451,296 @@ namespace Coophead
             var body = player.GetComponent<Rigidbody2D>();
             if (body != null)
                 body.velocity = Vector2.zero;
+        }
+
+        private static void BufferRemotePlayerState(PlayerStateSnapshot state)
+        {
+            var now = Time.realtimeSinceStartup;
+            var sceneName = SceneManager.GetActiveScene().name;
+            if (remotePlayerStateBuffer.Count != 0)
+            {
+                var previous = remotePlayerStateBuffer[
+                    remotePlayerStateBuffer.Count - 1];
+                if (previous.SceneName != sceneName)
+                {
+                    remotePlayerStateBuffer.Clear();
+                    lastBufferedPlayerStateRealtime = 0f;
+                }
+                else if (HasDiscretePlayerStateChange(previous.State, state))
+                {
+                    remotePlayerStateBuffer.Clear();
+                    Plugin.Log.LogInfo("[StateSync] Buffer reiniciado por cambio " +
+                        "discreto (presentes=" + state.PresentMask +
+                        ", muertos=" + state.DeadMask + ", revive=" +
+                        GetRevivingMask(state) + ").");
+                }
+            }
+            if (lastBufferedPlayerStateRealtime > 0f)
+                maxBufferedPlayerStateGap = Mathf.Max(maxBufferedPlayerStateGap,
+                    now - lastBufferedPlayerStateRealtime);
+            lastBufferedPlayerStateRealtime = now;
+            remotePlayerStateBuffer.Add(new BufferedPlayerState(
+                state, sceneName, now));
+            if (remotePlayerStateBuffer.Count > RemoteStateBufferCapacity)
+                remotePlayerStateBuffer.RemoveAt(0);
+            RebuildBufferedPlayerStateTimeline(now, state.Tick);
+        }
+
+        private static bool HasDiscretePlayerStateChange(
+            PlayerStateSnapshot previous, PlayerStateSnapshot current)
+        {
+            return previous.PresentMask != current.PresentMask ||
+                previous.DeadMask != current.DeadMask ||
+                GetRevivingMask(previous) != GetRevivingMask(current);
+        }
+
+        private static byte GetRevivingMask(PlayerStateSnapshot state)
+        {
+            byte mask = 0;
+            if ((state.PlayerOneMotionFlags & PlayerMotionFlags.Reviving) != 0)
+                mask |= 1;
+            if ((state.PlayerTwoMotionFlags & PlayerMotionFlags.Reviving) != 0)
+                mask |= 2;
+            return mask;
+        }
+
+        private static void RebuildBufferedPlayerStateTimeline(float newestRealtime,
+            uint newestTick)
+        {
+            // UDP y TCP pueden entregar varios datagramas/frames en el mismo Update.
+            // Se conservan todos y se reconstruye su separación con el tick del host,
+            // terminando siempre en el instante real de la ráfaga. Así no quedan con
+            // el mismo timestamp ni se empuja el snapshot más nuevo hacia el futuro.
+            for (var i = 0; i < remotePlayerStateBuffer.Count; i++)
+            {
+                var buffered = remotePlayerStateBuffer[i];
+                var tickDistance = unchecked((int)(newestTick -
+                    buffered.State.Tick));
+                if (tickDistance < 0)
+                    tickDistance = 0;
+                remotePlayerStateBuffer[i] = new BufferedPlayerState(
+                    buffered.State, buffered.SceneName,
+                    newestRealtime - tickDistance *
+                        RemoteStateNominalIntervalSeconds);
+            }
+        }
+
+        internal static void RenderBufferedRemotePlayersLate()
+        {
+            if (!IsClientSession || !transport.IsConnected ||
+                SessionOverlayVisible || SceneTransitionActive ||
+                !hasRemotePlayerState ||
+                latestRemotePlayerStateScene != SceneManager.GetActiveScene().name ||
+                Time.realtimeSinceStartup - lastRemotePlayerStateRealtime > 0.5f)
+                return;
+
+            PlayerStateSnapshot from;
+            PlayerStateSnapshot to;
+            float blend;
+            if (!TryGetBufferedPlayerStates(out from, out to, out blend))
+                return;
+
+            if (Map.Current != null)
+            {
+                if (!mapBootstrapCompleted)
+                    return;
+                var players = Map.Current.players;
+                if (players == null || players.Length < 2)
+                    return;
+                if ((to.PresentMask & 1) != 0 && players[0] != null)
+                {
+                    var target = InterpolatePlayerPosition(players[0].transform,
+                        from.PlayerOneX, from.PlayerOneY,
+                        to.PlayerOneX, to.PlayerOneY, blend);
+                    maxPlayerOneRenderError = Mathf.Max(maxPlayerOneRenderError,
+                        Vector2.Distance(players[0].transform.position, target));
+                    RenderAuthoritativeMapPlayer(players[0], target);
+                }
+                if ((to.PresentMask & 2) != 0 && players[1] != null)
+                {
+                    var target = InterpolatePlayerPosition(players[1].transform,
+                        from.PlayerTwoX, from.PlayerTwoY,
+                        to.PlayerTwoX, to.PlayerTwoY, blend);
+                    maxPlayerTwoRenderError = Mathf.Max(maxPlayerTwoRenderError,
+                        Vector2.Distance(players[1].transform.position, target));
+                    RenderAuthoritativeMapPlayer(players[1], target);
+                }
+                if (!authoritativeMapRenderReported)
+                {
+                    authoritativeMapRenderReported = true;
+                    Plugin.Log.LogMessage("[MapAuthority] El invitado representa " +
+                        "ambos jugadores desde la simulación del host.");
+                }
+                ReportRemoteRenderTelemetry();
+                return;
+            }
+
+            if (Level.Current == null || !Level.Current.Started ||
+                (to.Flags & PlayerStateFlags.GameplayStarted) == 0 ||
+                (to.PresentMask & 1) == 0 || (to.DeadMask & 1) != 0 ||
+                (to.PlayerOneMotionFlags & PlayerMotionFlags.Reviving) != 0)
+                return;
+            AbstractPlayerController playerOne;
+            try { playerOne = PlayerManager.GetPlayer(PlayerId.PlayerOne); }
+            catch { return; }
+            if (playerOne == null || !playerOne.gameObject.activeInHierarchy)
+                return;
+            var levelTarget = InterpolatePlayerPosition(playerOne.transform,
+                from.PlayerOneX, from.PlayerOneY,
+                to.PlayerOneX, to.PlayerOneY, blend);
+            maxPlayerOneRenderError = Mathf.Max(maxPlayerOneRenderError,
+                Vector2.Distance(playerOne.transform.position, levelTarget));
+            RenderAuthoritativeLevelPlayerOne(playerOne, levelTarget);
+            ReportRemoteRenderTelemetry();
+        }
+
+        private static bool TryGetBufferedPlayerStates(
+            out PlayerStateSnapshot from, out PlayerStateSnapshot to,
+            out float blend)
+        {
+            from = default(PlayerStateSnapshot);
+            to = default(PlayerStateSnapshot);
+            blend = 0f;
+            if (remotePlayerStateBuffer.Count == 0)
+                return false;
+
+            var targetRealtime = Time.realtimeSinceStartup -
+                RemoteStateInterpolationDelaySeconds;
+            while (remotePlayerStateBuffer.Count > 2 &&
+                remotePlayerStateBuffer[1].ReceivedRealtime <= targetRealtime)
+                remotePlayerStateBuffer.RemoveAt(0);
+
+            var first = remotePlayerStateBuffer[0];
+            if (remotePlayerStateBuffer.Count == 1)
+            {
+                from = first.State;
+                to = first.State;
+                return true;
+            }
+
+            var second = remotePlayerStateBuffer[1];
+            from = first.State;
+            to = second.State;
+            if (targetRealtime <= first.ReceivedRealtime)
+                blend = 0f;
+            else if (targetRealtime >= second.ReceivedRealtime)
+                blend = 1f;
+            else
+                blend = Mathf.InverseLerp(first.ReceivedRealtime,
+                    second.ReceivedRealtime, targetRealtime);
+            return true;
+        }
+
+        private static Vector3 InterpolatePlayerPosition(Transform player,
+            float fromX, float fromY, float toX, float toY, float blend)
+        {
+            return new Vector3(Mathf.Lerp(fromX, toX, blend),
+                Mathf.Lerp(fromY, toY, blend), player.position.z);
+        }
+
+        private static void RenderAuthoritativeMapPlayer(
+            MapPlayerController player, Vector3 position)
+        {
+            player.transform.position = position;
+            if (player.motor != null && MapPlayerMotorVelocityField != null)
+                MapPlayerMotorVelocityField.SetValue(player.motor, Vector2.zero);
+            var body = player.GetComponent<Rigidbody2D>();
+            if (body != null)
+                body.velocity = Vector2.zero;
+        }
+
+        private static void RenderAuthoritativeLevelPlayerOne(
+            AbstractPlayerController player, Vector3 position)
+        {
+            player.transform.position = position;
+            var levelPlayer = player as LevelPlayerController;
+            var motor = levelPlayer == null ? null : levelPlayer.motor;
+            if (motor == null)
+                return;
+            if (LevelPlayerMotorLastPositionField != null)
+                LevelPlayerMotorLastPositionField.SetValue(motor,
+                    (Vector2)position);
+            if (LevelPlayerMotorLastPositionFixedField != null)
+                LevelPlayerMotorLastPositionFixedField.SetValue(motor,
+                    (Vector2)position);
+        }
+
+        private static void ReportRemoteRenderTelemetry()
+        {
+            var now = Time.realtimeSinceStartup;
+            if (lastRenderTelemetryRealtime > 0f &&
+                now - lastRenderTelemetryRealtime < 5f)
+                return;
+            lastRenderTelemetryRealtime = now;
+            Plugin.Log.LogInfo("[StateSync] Buffer=" +
+                remotePlayerStateBuffer.Count + " gapMax=" +
+                (maxBufferedPlayerStateGap * 1000f).ToString("0") +
+                "ms errorP1=" + maxPlayerOneRenderError.ToString("0.0") +
+                " errorP2=" + maxPlayerTwoRenderError.ToString("0.0") +
+                " ping=" + transport.PingMilliseconds + "ms pérdida=" +
+                transport.EstimatedPacketLossPercent + "%.");
+            maxBufferedPlayerStateGap = 0f;
+            maxPlayerOneRenderError = 0f;
+            maxPlayerTwoRenderError = 0f;
+        }
+
+        private static uint CreateInputSessionNonce()
+        {
+            var nonce = unchecked((uint)System.Guid.NewGuid().GetHashCode() ^
+                (uint)System.Environment.TickCount ^
+                (uint)System.DateTime.UtcNow.Ticks);
+            return nonce == 0 ? 1u : nonce;
+        }
+
+        private static void BaselineRemoteStateEpoch(PlayerStateSnapshot state)
+        {
+            remotePlayerStateBuffer.Clear();
+            lastBufferedPlayerStateRealtime = 0f;
+            lastRemoteStateSessionNonce = state.StateSessionNonce;
+            lastRemotePlayerStateTick = 0;
+            hasRemotePlayerStateTick = false;
+            lastRemotePlayerOneSuperActionSequence =
+                state.PlayerOneSuperActionSequence;
+            hasRemotePlayerOneSuperActionSequence = true;
+            lastRemotePlayerTwoSuperActionSequence =
+                state.PlayerTwoSuperActionSequence;
+            hasRemotePlayerTwoSuperActionSequence = true;
+            Plugin.Log.LogInfo("[StateSync] Nueva época de estado: " +
+                state.StateSessionNonce.ToString("X8") + ".");
+        }
+
+        private static void ResetRemoteInputEpoch(uint nonce)
+        {
+            lastRemoteInputSessionNonce = nonce;
+            localStateSessionNonce = CreateInputSessionNonce();
+            ResetRemoteGuestLoadout(false);
+            lastRemotePlayerTwoSuperRequestSequence = 0;
+            hasRemotePlayerTwoSuperRequestSequence = false;
+            ClearPlayerTwoSuperRequestQueues();
+            hostPlayerTwoSuperActionSequence = 0;
+            remoteMapAcceptDeadline = 0f;
+            remoteInputNeutralizedForStall = false;
+            ResetInputEdgeLatches();
+            Plugin.Log.LogInfo("[InputSync] Nueva época de input P2: " +
+                nonce.ToString("X8") + ".");
+        }
+
+        private static void ResetInputEpochForReconnect()
+        {
+            localInputSessionNonce = CreateInputSessionNonce();
+            lastRemoteInputSessionNonce = 0;
+            localStateSessionNonce = CreateInputSessionNonce();
+            lastRemoteStateSessionNonce = 0;
+            localPlayerTwoSuperRequestSequence = 0;
+            localPlayerTwoSuperRequestAdvertiseDeadline = 0f;
+            lastRemotePlayerTwoSuperRequestSequence = 0;
+            hasRemotePlayerTwoSuperRequestSequence = false;
+            ClearPlayerTwoSuperRequestQueues();
+            hostPlayerTwoSuperActionSequence = 0;
+            lastRemotePlayerTwoSuperActionSequence = 0;
+            hasRemotePlayerTwoSuperActionSequence = false;
+            remotePlayerTwoSuperDeferralDeadline = 0f;
+            ResetRemoteGuestLoadout(false);
         }
 
         private static bool IsNewerTick(uint candidate, uint current)
@@ -2386,7 +3884,7 @@ namespace Coophead
                 var index = (int)id;
                 if (players == null || index < 0 || index >= players.Length || players[index] == null)
                     return;
-                CorrectMapTransform(players[index].transform, x, y);
+                CorrectMapTransform(players[index], id, x, y);
                 return;
             }
 
@@ -2416,18 +3914,58 @@ namespace Coophead
                     Mathf.Clamp01(Time.unscaledDeltaTime * 8f));
         }
 
-        private static void CorrectMapTransform(Transform playerTransform, float x, float y)
+        private static void CorrectMapTransform(MapPlayerController player,
+            PlayerId id, float x, float y)
         {
+            var playerTransform = player.transform;
             var current = playerTransform.position;
             var target = new Vector3(x, y, current.z);
             var distance = Vector2.Distance(current, target);
-            var hostMoving = latestRemotePlayerState.PlayerOneMapHorizontal != 0 ||
-                latestRemotePlayerState.PlayerOneMapVertical != 0;
-            if (distance > 20f)
-                playerTransform.position = target;
-            else if (!hostMoving && distance > 0.5f)
-                playerTransform.position = Vector3.Lerp(current, target,
-                    Mathf.Clamp01(Time.unscaledDeltaTime * 6f));
+            var actorMoving = id == PlayerId.PlayerOne ?
+                latestRemotePlayerState.PlayerOneMapHorizontal != 0 ||
+                    latestRemotePlayerState.PlayerOneMapVertical != 0 :
+                Mathf.Abs(received.Horizontal) > 16 ||
+                    Mathf.Abs(received.Vertical) > 16;
+
+            // Una divergencia grande ya no es latencia normal: se corrige aun
+            // con el stick mantenido para que las colisiones no separen mapas.
+            if (distance > 32f)
+            {
+                AlignMapPlayer(player, target);
+                if (id == PlayerId.PlayerTwo)
+                    playerTwoMapNeutralSinceRealtime = 0f;
+                return;
+            }
+            if (distance <= 0.35f)
+                return;
+
+            if (actorMoving)
+            {
+                if (id == PlayerId.PlayerTwo)
+                    playerTwoMapNeutralSinceRealtime = 0f;
+                return;
+            }
+
+            if (id == PlayerId.PlayerTwo)
+            {
+                var now = Time.realtimeSinceStartup;
+                if (playerTwoMapNeutralSinceRealtime <= 0f)
+                {
+                    playerTwoMapNeutralSinceRealtime = now;
+                    return;
+                }
+                var settleSeconds = Mathf.Clamp(
+                    Mathf.Max(0, transport.PingMilliseconds) * 0.001f + 0.05f,
+                    0.08f, 0.35f);
+                if (now - playerTwoMapNeutralSinceRealtime < settleSeconds)
+                    return;
+            }
+
+            if (distance > 12f)
+                AlignMapPlayer(player, target);
+            else
+                AlignMapPlayer(player, Vector3.Lerp(current, target,
+                    Mathf.Clamp01(Time.unscaledDeltaTime * 8f)));
         }
 
         private static void ReportPlayerTwoWhenReady()
@@ -2451,6 +3989,8 @@ namespace Coophead
 
         public static float GetAxis(int actionId)
         {
+            if (IsClientSession && LocalPhysicalInputBlocked)
+                return 0f;
             return IsGameplayInputLocked() ? 0f : received.GetAxis(actionId);
         }
 
@@ -2465,7 +4005,9 @@ namespace Coophead
 
         public static bool GetButton(int actionId, ButtonPhase phase)
         {
-            if (IsGameplayInputLocked())
+            if ((IsClientSession && LocalPhysicalInputBlocked) ||
+                ClientMapIsHostAuthoritative ||
+                IsGameplayInputLocked())
                 return false;
             var button = MapButton(actionId);
             if (button == InputButtons.None)
@@ -2473,6 +4015,13 @@ namespace Coophead
 
             if (phase == ButtonPhase.Pressed)
             {
+                if (button == InputButtons.Super && IsHostSession &&
+                    TryOfferHostPlayerTwoSuperRequest())
+                    return true;
+                if (button == InputButtons.Accept && IsHostSession &&
+                    Map.Current != null && mapLevelInteractionInputProbeActive &&
+                    Time.realtimeSinceStartup <= remoteMapAcceptDeadline)
+                    return true;
                 var edges = (FixedGameplayButtons & button) != 0 ?
                     playerTwoFixedPressed : received.Pressed;
                 return (edges & button) != 0;
@@ -2484,6 +4033,22 @@ namespace Coophead
                 return (edges & button) != 0;
             }
             return received.HasHeld(button);
+        }
+
+        internal static void ConsumeRemoteMapLevelInteraction()
+        {
+            if (IsHostSession)
+                remoteMapAcceptDeadline = 0f;
+        }
+
+        internal static void BeginMapLevelInteractionInputProbe()
+        {
+            mapLevelInteractionInputProbeActive = true;
+        }
+
+        internal static void EndMapLevelInteractionInputProbe()
+        {
+            mapLevelInteractionInputProbeActive = false;
         }
 
         public static float GetButtonTimePressed(int actionId)
@@ -2517,6 +4082,90 @@ namespace Coophead
             remotePlayerOnePendingReleased |= released & FixedGameplayButtons;
         }
 
+        private static void AdvanceHostPlayerTwoSuperRequestDeadline(
+            bool gameplayInputLocked)
+        {
+            if (hostPendingPlayerTwoSuperRequests.Count == 0)
+            {
+                hostOfferedPlayerTwoSuperRequestSequence = 0;
+                return;
+            }
+
+            var request = hostPendingPlayerTwoSuperRequests.Peek();
+            if (gameplayInputLocked)
+            {
+                // Un FixedUpdate de pausa/carga no consume tiempo elegible.
+                request.PolledSinceLastFixedUpdate = false;
+                return;
+            }
+            if (request.DeadlineStarted && request.PolledSinceLastFixedUpdate)
+                request.RemainingEligibleSeconds -=
+                    Mathf.Max(Time.fixedDeltaTime, 0.001f);
+            request.PolledSinceLastFixedUpdate = false;
+        }
+
+        private static bool TryOfferHostPlayerTwoSuperRequest()
+        {
+            while (hostPendingPlayerTwoSuperRequests.Count != 0)
+            {
+                var request = hostPendingPlayerTwoSuperRequests.Peek();
+                if (request.DeadlineStarted &&
+                    request.RemainingEligibleSeconds <= 0f)
+                {
+                    hostPendingPlayerTwoSuperRequests.Dequeue();
+                    if (hostOfferedPlayerTwoSuperRequestSequence ==
+                        request.Sequence)
+                        hostOfferedPlayerTwoSuperRequestSequence = 0;
+                    Plugin.Log.LogWarning("[InputSync] La solicitud de " +
+                        "EX/Super P2 expiró sin consumo (#" +
+                        request.Sequence + ").");
+                    continue;
+                }
+
+                if (!request.DeadlineStarted)
+                {
+                    request.DeadlineStarted = true;
+                    request.RemainingEligibleSeconds = Mathf.Clamp(
+                        transport.PingMilliseconds * 0.001f + 0.2f,
+                        0.5f, 1.25f);
+                }
+                request.PolledSinceLastFixedUpdate = true;
+                hostOfferedPlayerTwoSuperRequestSequence = request.Sequence;
+                return true;
+            }
+
+            hostOfferedPlayerTwoSuperRequestSequence = 0;
+            return false;
+        }
+
+        private static bool RemoveQueuedSequence(
+            System.Collections.Generic.Queue<uint> queue, uint sequence)
+        {
+            var removed = false;
+            var count = queue.Count;
+            for (var i = 0; i < count; i++)
+            {
+                var queued = queue.Dequeue();
+                if (!removed && queued == sequence)
+                    removed = true;
+                else
+                    queue.Enqueue(queued);
+            }
+            return removed;
+        }
+
+        private static void ClearPlayerTwoSuperRequestQueues()
+        {
+            hostPendingPlayerTwoSuperRequests.Clear();
+            hostOfferedPlayerTwoSuperRequestSequence = 0;
+            localPlayerTwoSuperDispatchQueue.Clear();
+            localPlayerTwoSuperDispatchedForFixed = 0;
+            localPredictedPlayerTwoSuperRequests.Clear();
+            playerTwoConfirmedSuperQueue.Clear();
+            playerTwoConfirmedSuperDispatchedForFixed = 0;
+            remotePlayerTwoSuperDeferralDeadline = 0f;
+        }
+
         private static void ResetInputEdgeLatches()
         {
             playerTwoPendingPressed = InputButtons.None;
@@ -2527,6 +4176,36 @@ namespace Coophead
             remotePlayerOnePendingReleased = InputButtons.None;
             remotePlayerOneFixedPressed = InputButtons.None;
             remotePlayerOneFixedReleased = InputButtons.None;
+            localPlayerTwoSuperDispatchedForFixed = 0;
+            playerTwoConfirmedSuperDispatchedForFixed = 0;
+        }
+
+        private sealed class PlayerTwoSuperRequest
+        {
+            public PlayerTwoSuperRequest(uint sequence)
+            {
+                Sequence = sequence;
+            }
+
+            public readonly uint Sequence;
+            public bool DeadlineStarted;
+            public float RemainingEligibleSeconds;
+            public bool PolledSinceLastFixedUpdate;
+        }
+
+        private struct BufferedPlayerState
+        {
+            public BufferedPlayerState(PlayerStateSnapshot state,
+                string sceneName, float receivedRealtime)
+            {
+                State = state;
+                SceneName = sceneName;
+                ReceivedRealtime = receivedRealtime;
+            }
+
+            public readonly PlayerStateSnapshot State;
+            public readonly string SceneName;
+            public readonly float ReceivedRealtime;
         }
 
         private static void ReportPlayerTwoCombatButtons(string source, InputFrame frame)
@@ -2548,19 +4227,70 @@ namespace Coophead
 
         private static InputFrame SampleConfiguredPlayerInput()
         {
+            if (LocalPhysicalInputBlocked)
+                return new InputFrame();
+
+            return SampleConfiguredPlayerInputUnfiltered();
+        }
+
+        private static InputFrame SampleConfiguredPlayerInputUnfiltered()
+        {
             samplingLocalInput = true;
             try
             {
                 var sampled = new InputFrame();
+                // En la computadora del invitado sus dispositivos y bindings
+                // pertenecen al perfil local de Player One. El frame ya contiene
+                // acciones semánticas, por lo que mezclar también Player Two o
+                // teclas hardcodeadas puede convertir una sola tecla en dos
+                // acciones distintas.
                 MergeConfiguredPlayer(PlayerId.PlayerOne, ref sampled);
-                MergeConfiguredPlayer(PlayerId.PlayerTwo, ref sampled);
-                MergeInput(ref sampled, SampleUnityFallbackInput());
                 return sampled;
             }
             finally
             {
                 samplingLocalInput = false;
             }
+        }
+
+        internal static InputFrame SampleLocalPlayerOneForUi()
+        {
+            if (LocalPhysicalInputBlocked)
+                return new InputFrame();
+
+            samplingLocalInput = true;
+            try
+            {
+                var sampled = new InputFrame();
+                MergeConfiguredPlayer(PlayerId.PlayerOne, ref sampled);
+                return sampled;
+            }
+            finally
+            {
+                samplingLocalInput = false;
+            }
+        }
+
+        private static void UpdateLocalPhysicalInputFocusGate()
+        {
+            if (!blockLocalInputWhenUnfocused || !Plugin.HasApplicationFocus ||
+                !localPhysicalInputNeedsRearm)
+                return;
+            if (Time.frameCount < localPhysicalInputRearmNotBeforeFrame)
+                return;
+
+            var sampled = SampleConfiguredPlayerInputUnfiltered();
+            const int axisDeadzone = 32;
+            if (Mathf.Abs(sampled.Horizontal) > axisDeadzone ||
+                Mathf.Abs(sampled.Vertical) > axisDeadzone ||
+                sampled.Held != InputButtons.None ||
+                sampled.Pressed != InputButtons.None)
+                return;
+
+            localPhysicalInputNeedsRearm = false;
+            localPhysicalInputRearmNotBeforeFrame = 0;
+            Plugin.Log.LogMessage("[Focus] Entrada local reactivada después de " +
+                "soltar controles físicos.");
         }
 
         private static void MergeConfiguredPlayer(PlayerId id, ref InputFrame sampled)
@@ -2820,6 +4550,7 @@ namespace Coophead
                 default: return InputButtons.None;
             }
         }
+
     }
 
     internal enum ButtonPhase

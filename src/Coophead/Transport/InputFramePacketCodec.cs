@@ -4,9 +4,14 @@ namespace Coophead.Transport
 {
     internal static class InputFramePacketCodec
     {
-        public const byte ProtocolVersion = 9;
+        public const byte ProtocolVersion = 13;
         public const byte InputPacketType = 1;
-        public const int PacketSize = 29;
+        public const int PacketSize = 58;
+        private const PlayerLoadoutFlags AllLoadoutFlags =
+            PlayerLoadoutFlags.HasEquippedSecondaryRegularWeapon |
+            PlayerLoadoutFlags.HasEquippedSecondaryShmupWeapon |
+            PlayerLoadoutFlags.MustNotifySwitchRegularWeapon |
+            PlayerLoadoutFlags.MustNotifySwitchShmupWeapon;
 
         public static byte[] Encode(InputFrame frame)
         {
@@ -25,6 +30,14 @@ namespace Coophead.Transport
             WriteUInt32(packet, 20, (uint)frame.Released);
             packet[24] = (byte)frame.Flags;
             WriteUInt32(packet, 25, frame.ReadyTransitionId);
+            WriteUInt32(packet, 29, frame.PlayerTwoSuperRequestSequence);
+            WriteUInt32(packet, 33, frame.InputSessionNonce);
+            WriteUInt32(packet, 37, frame.GuestLoadoutRevision);
+            WriteInt32(packet, 41, frame.GuestLoadout.PrimaryWeapon);
+            WriteInt32(packet, 45, frame.GuestLoadout.SecondaryWeapon);
+            WriteInt32(packet, 49, frame.GuestLoadout.Super);
+            WriteInt32(packet, 53, frame.GuestLoadout.Charm);
+            packet[57] = (byte)frame.GuestLoadout.Flags;
             return packet;
         }
 
@@ -46,7 +59,32 @@ namespace Coophead.Transport
             frame.Released = (InputButtons)ReadUInt32(packet, 20);
             frame.Flags = (InputFrameFlags)packet[24];
             frame.ReadyTransitionId = ReadUInt32(packet, 25);
-            return true;
+            frame.PlayerTwoSuperRequestSequence = ReadUInt32(packet, 29);
+            frame.InputSessionNonce = ReadUInt32(packet, 33);
+            frame.GuestLoadoutRevision = ReadUInt32(packet, 37);
+            frame.GuestLoadout.PrimaryWeapon = ReadInt32(packet, 41);
+            frame.GuestLoadout.SecondaryWeapon = ReadInt32(packet, 45);
+            frame.GuestLoadout.Super = ReadInt32(packet, 49);
+            frame.GuestLoadout.Charm = ReadInt32(packet, 53);
+            frame.GuestLoadout.Flags = (PlayerLoadoutFlags)packet[57];
+
+            if (frame.GuestLoadoutRevision == 0)
+                return true;
+            return (frame.GuestLoadout.Flags & ~AllLoadoutFlags) == 0 &&
+                frame.GuestLoadout.PrimaryWeapon != 0 &&
+                frame.GuestLoadout.SecondaryWeapon != 0 &&
+                frame.GuestLoadout.Super != 0 &&
+                frame.GuestLoadout.Charm != 0;
+        }
+
+        private static void WriteInt32(byte[] buffer, int offset, int value)
+        {
+            WriteUInt32(buffer, offset, unchecked((uint)value));
+        }
+
+        private static int ReadInt32(byte[] buffer, int offset)
+        {
+            return unchecked((int)ReadUInt32(buffer, offset));
         }
 
         private static void WriteUInt32(byte[] buffer, int offset, uint value)

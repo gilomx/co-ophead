@@ -3,12 +3,12 @@ using System.Runtime.InteropServices;
 using Coophead;
 using Coophead.Transport;
 
-const uint VersionToken = 0x00120B;
+const uint VersionToken = 0x001210;
 var host = args.Length > 0 ? args[0] : "127.0.0.1";
 var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 27182;
 
-Console.Title = "Co-ophead LAN Sender 0.11.2";
-Console.WriteLine("Co-ophead LAN Sender 0.11.2");
+Console.Title = "Co-ophead LAN Sender 0.12.10";
+Console.WriteLine("Co-ophead LAN Sender 0.12.10");
 Console.WriteLine($"Destino: {host}:{port}");
 Console.WriteLine("Mantén Cuphead enfocado. F7 cierra este sender.");
 Console.WriteLine();
@@ -24,6 +24,17 @@ var hasPrintedContext = false;
 var lastPrintedContext = default(SessionContext);
 var nextStatePrintAt = TimeSpan.Zero;
 uint tick = 0;
+uint superRequestSequence = 0;
+var inputSessionNonce = unchecked((uint)Guid.NewGuid().GetHashCode());
+if (inputSessionNonce == 0) inputSessionNonce = 1;
+var superRequestAdvertiseUntil = TimeSpan.Zero;
+var guestLoadout = new PlayerLoadoutSnapshot
+{
+    PrimaryWeapon = 1456773641,
+    SecondaryWeapon = int.MaxValue,
+    Super = int.MaxValue,
+    Charm = int.MaxValue,
+};
 
 while (!KeyDown(VirtualKey.F7))
 {
@@ -71,14 +82,27 @@ while (!KeyDown(VirtualKey.F7))
         nextFrameAt += frameInterval;
         tick++;
         var held = ReadButtons();
+        var pressed = held & ~previousHeld;
+        if ((pressed & InputButtons.Super) != 0)
+        {
+            superRequestSequence++;
+            if (superRequestSequence == 0) superRequestSequence = 1;
+            superRequestAdvertiseUntil = stopwatch.Elapsed + TimeSpan.FromSeconds(3);
+        }
         transport.Send(new InputFrame
         {
             Tick = tick,
             Horizontal = ReadAxis(VirtualKey.Numpad4, VirtualKey.Numpad6),
             Vertical = ReadAxis(VirtualKey.Numpad2, VirtualKey.Numpad8),
             Held = held,
-            Pressed = held & ~previousHeld,
+            Pressed = pressed,
             Released = previousHeld & ~held,
+            PlayerTwoSuperRequestSequence =
+                stopwatch.Elapsed <= superRequestAdvertiseUntil ?
+                    superRequestSequence : 0,
+            InputSessionNonce = inputSessionNonce,
+            GuestLoadoutRevision = 1,
+            GuestLoadout = guestLoadout,
         });
         previousHeld = held;
     }

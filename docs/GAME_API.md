@@ -112,11 +112,25 @@ de jugadores se restaura después de cada lectura y el gameplay no se modifica.
 
 Cuphead mantiene un solo `PlayerData.CurrentSaveFileIndex` para la partida y loadouts
 separados por `PlayerId`. Por eso el host elige el save autoritativo y el cliente
-bloquea `PlayerData.SaveCurrentFile()` durante la conexión. `player1IsMugman` basta
-para garantizar personajes distintos: Player Two usa automáticamente el opuesto.
-Por ahora el protocolo transmite el índice y contexto del save, no todos sus datos;
-el invitado necesita un slot compatible y cualquier cambio local permanece sin
-guardarse durante la sesión.
+bloquea `PlayerData.SaveCurrentFile()`, `Save(int)` y `SaveAll()` durante la conexión.
+Antes de prestar un slot, conserva con `JsonUtility.ToJson` exactamente el estado que
+Cuphead escribiría a disco y lo restaura con `FromJsonOverwrite` al salir. Así también
+se descartan muertes, monedas, parries y posiciones simuladas por el invitado.
+`player1IsMugman` basta para garantizar personajes distintos: Player Two usa
+automáticamente el opuesto.
+Desde `0.12.10`, el invitado anuncia el `PlayerLoadout` de su Player One local para
+usarlo como Player Two. El host devuelve en `SessionContext` los loadouts aceptados
+de ambos jugadores. Un postfix de `PlayerLoadouts.GetPlayerLoadout(PlayerId)` entrega
+objetos overlay mantenidos en memoria: `PlayerStatsManager.LevelInit`, HUD y weapon
+managers reciben arma primaria/secundaria, súper y amuleto iguales sin escribirlos
+en el save. La escena coordinada espera un contexto con el mismo `LoadTransitionId`
+antes de crear a los jugadores.
+
+El protocolo todavía no transmite todo el inventario ni el progreso. En particular,
+la bomba secundaria de avión consulta `PlayerData.IsUnlocked`, y reliquia maldita,
+Djimmi y algunos efectos DLC dependen de datos adicionales. El selector explícito de
+save del invitado también queda pendiente; por ahora se captura su slot local activo
+al pulsar **UNIRSE**.
 
 ## Repetir la inspección
 

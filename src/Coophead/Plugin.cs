@@ -17,10 +17,11 @@ namespace Coophead
     {
         public const string PluginGuid = "mx.gilomx.coophead";
         public const string PluginName = "Co-ophead";
-        public const string PluginVersion = "0.12.6";
+        public const string PluginVersion = "0.12.10";
 
         internal static BepInEx.Logging.ManualLogSource Log { get; private set; }
         internal static Plugin Instance { get; private set; }
+        internal static bool HasApplicationFocus { get; private set; } = true;
 
         private Harmony harmony;
         private ConfigEntry<InputTransportMode> transportMode;
@@ -33,6 +34,7 @@ namespace Coophead
         private ConfigEntry<string> stunHost;
         private ConfigEntry<int> stunPort;
         private ConfigEntry<bool> runInBackgroundForTesting;
+        private ConfigEntry<bool> blockLocalInputWhenUnfocused;
         private bool showOnlineMenu;
         private string joinCode = "";
         private string onlineMessage = "";
@@ -40,11 +42,15 @@ namespace Coophead
         private bool focusLossRecorded;
         private int focusLostFrame;
         private float focusLostRealtime;
+        private int interruptionSelection;
+        private bool interruptionOptionsWereVisible;
 
         private void Awake()
         {
             Instance = this;
+            HasApplicationFocus = Application.isFocused;
             Log = Logger;
+            gameObject.AddComponent<RemotePlayerLateRenderer>();
             Logger.LogInfo(PluginName + " " + PluginVersion + " cargado.");
             transportMode = Config.Bind("InputLab", "Transport", InputTransportMode.Loopback,
                 "Loopback, LanHost o LanClient.");
@@ -65,11 +71,16 @@ namespace Coophead
                 "Servidor STUN para descubrir el endpoint público.");
             stunPort = Config.Bind("P2P", "StunPort", 3478,
                 "Puerto UDP del servidor STUN.");
-            runInBackgroundForTesting = Config.Bind("Testing", "RunInBackground", true,
-                "Temporal para pruebas: mantiene Cuphead activo al cambiar de ventana. " +
-                "El comportamiento final será false.");
+            runInBackgroundForTesting = Config.Bind("Testing", "RunInBackground", false,
+                "Mantiene Cuphead activo al cambiar de ventana. El valor normal es false.");
+            blockLocalInputWhenUnfocused = Config.Bind("Testing",
+                "BlockLocalInputWhenUnfocused", false,
+                "Filtro experimental: neutraliza el input físico local cuando Cuphead " +
+                "no tiene foco. El valor normal es false.");
             RemoteInputLab.SetRunInBackgroundForTesting(
                 runInBackgroundForTesting.Value);
+            RemoteInputLab.SetBlockLocalInputWhenUnfocused(
+                blockLocalInputWhenUnfocused.Value);
             try
             {
                 RemoteInputLab.Configure(transportMode.Value, lanHostAddress.Value, lanPort.Value,
@@ -89,16 +100,18 @@ namespace Coophead
         {
             if (MainMenuIntegration.MenuOpen)
                 showOnlineMenu = false;
-            else if (Input.GetKeyDown(KeyCode.F6))
+            else if (HasApplicationFocus && Input.GetKeyDown(KeyCode.F6))
             {
                 if (showOnlineMenu)
                     CloseOnlineWindow();
                 else
                     showOnlineMenu = true;
             }
-            if (showOnlineMenu && Input.GetKeyDown(KeyCode.Escape))
+            if (HasApplicationFocus && showOnlineMenu &&
+                Input.GetKeyDown(KeyCode.Escape))
                 CloseOnlineWindow();
             RemoteInputLab.Tick();
+            HandleSessionInterruptionInput();
         }
 
         private void FixedUpdate()
@@ -113,11 +126,23 @@ namespace Coophead
 
         private void OnGUI()
         {
-            if (showOnlineMenu)
-                onlineWindow = GUI.Window(78216, onlineWindow, DrawOnlineWindow, "CO-OPHEAD");
-            DrawConnectionQualityHud();
-            DrawLevelLoadMessage();
-            DrawSessionInterruptionOverlay();
+            var previousGuiEnabled = GUI.enabled;
+            if (RemoteInputLab.LocalPhysicalInputBlocked)
+                GUI.enabled = false;
+            try
+            {
+                if (showOnlineMenu)
+                    onlineWindow = GUI.Window(78216, onlineWindow,
+                        DrawOnlineWindow, "CO-OPHEAD");
+                DrawConnectionQualityHud();
+                DrawLevelLoadMessage();
+                DrawSessionInterruptionOverlay();
+                DrawSessionNotice();
+            }
+            finally
+            {
+                GUI.enabled = previousGuiEnabled;
+            }
         }
 
         private void DrawLevelLoadMessage()
@@ -172,6 +197,25 @@ namespace Coophead
             GUI.Box(new Rect(Screen.width - 255, 14, 240, 30), text, style);
         }
 
+        private void DrawSessionNotice()
+        {
+            var message = RemoteInputLab.SessionNotice;
+            if (string.IsNullOrEmpty(message))
+                return;
+
+            var style = new GUIStyle(GUI.skin.box)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 19,
+                fontStyle = FontStyle.Bold,
+                wordWrap = true,
+            };
+            style.normal.textColor = Color.white;
+            var width = Mathf.Min(620f, Screen.width - 40f);
+            GUI.Box(new Rect((Screen.width - width) * 0.5f, 36f,
+                width, 72f), message, style);
+        }
+
         private void DrawSessionInterruptionOverlay()
         {
             if (!RemoteInputLab.SessionOverlayVisible)
@@ -219,20 +263,77 @@ namespace Coophead
                 GUILayout.FlexibleSpace();
                 GUILayout.BeginHorizontal();
                 GUILayout.Space(35);
-                if (GUILayout.Button("SEGUIR ESPERANDO", GUILayout.Height(38)))
-                {
-                    // Esperar es el comportamiento predeterminado; el botón sirve
-                    // para dejar explícita la elección sin alterar la sesión.
-                }
+                var previousBackground = GUI.backgroundColor;
+                GUI.backgroundColor = interruptionSelection == 0 ?
+                    new Color(1f, 0.82f, 0.32f) : Color.white;
+                if (GUILayout.Button(interruptionSelection == 0 ?
+                    ">  SEGUIR ESPERANDO  <" : "SEGUIR ESPERANDO",
+                    GUILayout.Height(38)))
+                    RemoteInputLab.ContinueWaiting();
                 GUILayout.Space(12);
-                if (GUILayout.Button("SALIR DE LA PARTIDA", GUILayout.Height(38)))
+                GUI.backgroundColor = interruptionSelection == 1 ?
+                    new Color(1f, 0.82f, 0.32f) : Color.white;
+                if (GUILayout.Button(interruptionSelection == 1 ?
+                    ">  SALIR DE LA PARTIDA  <" : "SALIR DE LA PARTIDA",
+                    GUILayout.Height(38)))
                     StopOnline();
+                GUI.backgroundColor = previousBackground;
                 GUILayout.Space(35);
                 GUILayout.EndHorizontal();
             }
             GUILayout.Space(14);
             GUILayout.EndArea();
             GUI.color = previousColor;
+        }
+
+        private void HandleSessionInterruptionInput()
+        {
+            if (!RemoteInputLab.SessionOverlayVisible)
+            {
+                interruptionSelection = 0;
+                interruptionOptionsWereVisible = false;
+                return;
+            }
+
+            var optionsVisible = RemoteInputLab.CanLeaveInterruptedSession;
+            if (!optionsVisible)
+            {
+                interruptionSelection = 0;
+                interruptionOptionsWereVisible = false;
+                return;
+            }
+            if (!interruptionOptionsWereVisible)
+            {
+                interruptionSelection = 0;
+                interruptionOptionsWereVisible = true;
+            }
+
+            var local = RemoteInputLab.SampleLocalPlayerOneForUi();
+            var pressed = local.Pressed;
+            var previous = interruptionSelection;
+            if ((pressed & (InputButtons.MenuUp | InputButtons.MenuLeft)) != 0 ||
+                Input.GetKeyDown(KeyCode.UpArrow) ||
+                Input.GetKeyDown(KeyCode.LeftArrow))
+                interruptionSelection = 0;
+            else if ((pressed & (InputButtons.MenuDown | InputButtons.MenuRight)) != 0 ||
+                Input.GetKeyDown(KeyCode.DownArrow) ||
+                Input.GetKeyDown(KeyCode.RightArrow))
+                interruptionSelection = 1;
+
+            if (previous != interruptionSelection)
+            {
+                try { AudioManager.Play("level_menu_move"); }
+                catch { }
+            }
+
+            var accept = (pressed & (InputButtons.Accept | InputButtons.Jump)) != 0 ||
+                Input.GetKeyDown(KeyCode.Z) || Input.GetKeyDown(KeyCode.Return);
+            if (!accept)
+                return;
+            if (interruptionSelection == 0)
+                RemoteInputLab.ContinueWaiting();
+            else
+                StopOnline();
         }
 
         private void DrawOnlineWindow(int id)
@@ -361,6 +462,8 @@ namespace Coophead
 
         private void OnApplicationFocus(bool hasFocus)
         {
+            HasApplicationFocus = hasFocus;
+            RemoteInputLab.OnApplicationFocusChanged(hasFocus);
             if (!hasFocus)
             {
                 focusLossRecorded = true;
@@ -368,7 +471,9 @@ namespace Coophead
                 focusLostRealtime = Time.realtimeSinceStartup;
                 Logger.LogInfo("[Focus] Cuphead perdió el foco. frame=" +
                     focusLostFrame + " runInBackground=" + Application.runInBackground +
-                    " sesión=" + RemoteInputLab.Enabled + ".");
+                    " sesión=" + RemoteInputLab.Enabled +
+                    " inputLocalBloqueado=" +
+                    RemoteInputLab.LocalPhysicalInputBlocked + ".");
                 return;
             }
 
@@ -381,7 +486,9 @@ namespace Coophead
             }
             Logger.LogInfo("[Focus] Cuphead recuperó el foco. frame=" + Time.frameCount +
                 details + " runInBackground=" + Application.runInBackground +
-                " sesión=" + RemoteInputLab.Enabled + ".");
+                " sesión=" + RemoteInputLab.Enabled +
+                " esperandoControlesNeutrales=" +
+                RemoteInputLab.LocalPhysicalInputBlocked + ".");
         }
 
         private void OnApplicationPause(bool paused)
@@ -398,7 +505,10 @@ namespace Coophead
                 harmony.UnpatchSelf();
             RemoteInputLab.Shutdown();
             if (Instance == this)
+            {
                 Instance = null;
+                HasApplicationFocus = true;
+            }
         }
     }
 }

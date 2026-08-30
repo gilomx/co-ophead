@@ -11,6 +11,8 @@ namespace Coophead.Transport
         public const byte Reject = 6;
         public const byte SceneAck = 8;
         public const byte ContextAck = 10;
+        public const byte Goodbye = 13;
+        public const byte GoodbyeAck = 14;
         public const int PacketSize = 10;
 
         public static byte[] Encode(byte type, uint value)
@@ -39,9 +41,9 @@ namespace Coophead.Transport
 
             type = packet[5];
             value = ReadUInt32(packet, 6);
-            return type >= Hello && type <= ContextAck &&
-                type != LanScenePacketCodec.ScenePacketType &&
-                type != LanSessionContextPacketCodec.ContextPacketType;
+            return type == Hello || type == HelloAck || type == Ping ||
+                type == Pong || type == Reject || type == SceneAck ||
+                type == ContextAck || type == Goodbye || type == GoodbyeAck;
         }
 
         private static void WriteUInt32(byte[] buffer, int offset, uint value)

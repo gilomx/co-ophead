@@ -16,6 +16,7 @@ namespace Coophead.Transport
         Dashing = 1 << 0,
         Hit = 1 << 1,
         UsingSuperOrEx = 1 << 2,
+        Reviving = 1 << 3,
     }
 
     internal struct PlayerStateSnapshot
@@ -30,6 +31,8 @@ namespace Coophead.Transport
         public float PlayerTwoY;
         public byte PlayerOneHealth;
         public byte PlayerTwoHealth;
+        public byte PlayerOneHealthMax;
+        public byte PlayerTwoHealthMax;
         public float PlayerOneSuperMeter;
         public float PlayerTwoSuperMeter;
         public sbyte PlayerOneMapHorizontal;
@@ -42,5 +45,7 @@ namespace Coophead.Transport
         public PlayerMotionFlags PlayerTwoMotionFlags;
         public sbyte PlayerTwoHitDirection;
         public uint PlayerOneSuperActionSequence;
+        public uint PlayerTwoSuperActionSequence;
+        public uint StateSessionNonce;
     }
 }

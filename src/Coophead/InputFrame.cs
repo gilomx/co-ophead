@@ -32,6 +32,35 @@ namespace Coophead
         MenuRight = 1u << 14,
     }
 
+    [Flags]
+    internal enum PlayerLoadoutFlags : byte
+    {
+        None = 0,
+        HasEquippedSecondaryRegularWeapon = 1 << 0,
+        HasEquippedSecondaryShmupWeapon = 1 << 1,
+        MustNotifySwitchRegularWeapon = 1 << 2,
+        MustNotifySwitchShmupWeapon = 1 << 3,
+    }
+
+    // IDs serializados del juego. Se mantienen como enteros para que el
+    // transporte y sus herramientas no dependan de Assembly-CSharp.
+    internal struct PlayerLoadoutSnapshot
+    {
+        public int PrimaryWeapon;
+        public int SecondaryWeapon;
+        public int Super;
+        public int Charm;
+        public PlayerLoadoutFlags Flags;
+
+        public bool SameAs(PlayerLoadoutSnapshot other)
+        {
+            return PrimaryWeapon == other.PrimaryWeapon &&
+                SecondaryWeapon == other.SecondaryWeapon &&
+                Super == other.Super && Charm == other.Charm &&
+                Flags == other.Flags;
+        }
+    }
+
     internal struct InputFrame
     {
         public uint Tick;
@@ -39,6 +68,14 @@ namespace Coophead
         public sbyte Vertical;
         public InputFrameFlags Flags;
         public uint ReadyTransitionId;
+        // Secuencia persistente: permite que un tap de EX sobreviva aunque se
+        // pierda el datagrama exacto que contenía el borde Pressed.
+        public uint PlayerTwoSuperRequestSequence;
+        public uint InputSessionNonce;
+        // El invitado repite su selección hasta que el host la reciba. La época
+        // de input distingue una revisión reutilizada después de reconectar.
+        public uint GuestLoadoutRevision;
+        public PlayerLoadoutSnapshot GuestLoadout;
         public InputButtons Held;
         public InputButtons Pressed;
         public InputButtons Released;

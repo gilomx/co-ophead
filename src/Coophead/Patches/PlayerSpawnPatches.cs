@@ -2,6 +2,19 @@ using HarmonyLib;
 
 namespace Coophead.Patches
 {
+    [HarmonyPatch(typeof(PlayerData.PlayerLoadouts), "GetPlayerLoadout")]
+    internal static class SessionPlayerLoadoutPatch
+    {
+        private static void Postfix(PlayerId player,
+            ref PlayerData.PlayerLoadouts.PlayerLoadout __result)
+        {
+            PlayerData.PlayerLoadouts.PlayerLoadout sessionLoadout;
+            if (RemoteInputLab.TryGetSessionLoadout(player,
+                out sessionLoadout))
+                __result = sessionLoadout;
+        }
+    }
+
     [HarmonyPatch(typeof(PlayerManager), "Awake")]
     internal static class PlayerManagerAwakePatch
     {
@@ -49,6 +62,24 @@ namespace Coophead.Patches
 
     [HarmonyPatch(typeof(PlayerData), "SaveCurrentFile")]
     internal static class ClientSaveProtectionPatch
+    {
+        private static bool Prefix()
+        {
+            return !RemoteInputLab.PreventLocalSave;
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerData), "Save")]
+    internal static class ClientDirectSaveProtectionPatch
+    {
+        private static bool Prefix()
+        {
+            return !RemoteInputLab.PreventLocalSave;
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerData), "SaveAll")]
+    internal static class ClientSaveAllProtectionPatch
     {
         private static bool Prefix()
         {

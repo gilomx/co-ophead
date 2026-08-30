@@ -5,7 +5,7 @@ namespace Coophead.Transport
     internal static class LanPlayerStatePacketCodec
     {
         public const byte PacketType = 11;
-        public const int PacketSize = 64;
+        public const int PacketSize = 74;
         private const InputButtons AllInputButtons =
             (InputButtons)((1u << 15) - 1u);
 
@@ -37,6 +37,10 @@ namespace Coophead.Transport
             packet[58] = (byte)state.PlayerTwoMotionFlags;
             packet[59] = unchecked((byte)state.PlayerTwoHitDirection);
             WriteUInt32(packet, 60, state.PlayerOneSuperActionSequence);
+            WriteUInt32(packet, 64, state.PlayerTwoSuperActionSequence);
+            WriteUInt32(packet, 68, state.StateSessionNonce);
+            packet[72] = state.PlayerOneHealthMax;
+            packet[73] = state.PlayerTwoHealthMax;
             return packet;
         }
 
@@ -69,15 +73,21 @@ namespace Coophead.Transport
             state.PlayerTwoMotionFlags = (PlayerMotionFlags)packet[58];
             state.PlayerTwoHitDirection = unchecked((sbyte)packet[59]);
             state.PlayerOneSuperActionSequence = ReadUInt32(packet, 60);
+            state.PlayerTwoSuperActionSequence = ReadUInt32(packet, 64);
+            state.StateSessionNonce = ReadUInt32(packet, 68);
+            state.PlayerOneHealthMax = packet[72];
+            state.PlayerTwoHealthMax = packet[73];
             return state.Tick != 0 && (state.PresentMask & ~3) == 0 &&
                 (state.DeadMask & ~3) == 0 &&
                 (state.Flags & ~PlayerStateFlags.GameplayStarted) == 0 &&
                 (state.PlayerOneMotionFlags & ~(PlayerMotionFlags.Dashing |
                     PlayerMotionFlags.Hit |
-                    PlayerMotionFlags.UsingSuperOrEx)) == 0 &&
+                    PlayerMotionFlags.UsingSuperOrEx |
+                    PlayerMotionFlags.Reviving)) == 0 &&
                 (state.PlayerTwoMotionFlags & ~(PlayerMotionFlags.Dashing |
                     PlayerMotionFlags.Hit |
-                    PlayerMotionFlags.UsingSuperOrEx)) == 0 &&
+                    PlayerMotionFlags.UsingSuperOrEx |
+                    PlayerMotionFlags.Reviving)) == 0 &&
                 state.PlayerTwoHitDirection >= -1 &&
                 state.PlayerTwoHitDirection <= 1 &&
                 (state.PlayerOneHeld & ~AllInputButtons) == 0 &&
@@ -98,6 +108,9 @@ namespace Coophead.Transport
         public static void MergeTransientEvents(ref PlayerStateSnapshot state,
             PlayerStateSnapshot skipped)
         {
+            if (state.StateSessionNonce != 0 && skipped.StateSessionNonce != 0 &&
+                state.StateSessionNonce != skipped.StateSessionNonce)
+                return;
             state.PlayerOnePressed |= skipped.PlayerOnePressed;
             state.PlayerOneReleased |= skipped.PlayerOneReleased;
             if ((skipped.PlayerTwoMotionFlags & PlayerMotionFlags.Hit) == 0)

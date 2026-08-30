@@ -10,6 +10,7 @@ namespace Coophead.Transport
         private readonly Queue<PlayerStateSnapshot> playerStates = new Queue<PlayerStateSnapshot>();
         private readonly Queue<BossStateSnapshot> bossStates = new Queue<BossStateSnapshot>();
         private uint nextSceneSequence = 1;
+        private bool isConnected = true;
 
         public LoopbackInputTransport(uint latencyFrames)
         {
@@ -19,8 +20,10 @@ namespace Coophead.Transport
         public uint LatencyFrames { get; }
 
         public string Description => "loopback, " + LatencyFrames + " frames de latencia";
-        public string Status => "conectado";
-        public bool IsConnected => true;
+        public string Status => isConnected ? "conectado" : "sesión cerrada";
+        public bool IsConnected => isConnected;
+        public bool PeerDisconnected { get; private set; }
+        public TransportDisconnectReason PeerDisconnectReason { get; private set; }
         public int PingMilliseconds => 0;
         public int EstimatedPacketLossPercent => 0;
 
@@ -30,6 +33,9 @@ namespace Coophead.Transport
 
         public void Reset()
         {
+            isConnected = true;
+            PeerDisconnected = false;
+            PeerDisconnectReason = TransportDisconnectReason.None;
             pending.Clear();
             scenes.Clear();
             contexts.Clear();
@@ -44,6 +50,11 @@ namespace Coophead.Transport
             contexts.Clear();
             playerStates.Clear();
             bossStates.Clear();
+        }
+
+        public void RequestDisconnect(TransportDisconnectReason reason)
+        {
+            isConnected = false;
         }
 
         public void Send(InputFrame frame)

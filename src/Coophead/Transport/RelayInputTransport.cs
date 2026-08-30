@@ -18,6 +18,8 @@ namespace Coophead.Transport
         private readonly Queue<SessionContext> contexts = new Queue<SessionContext>();
         private readonly Queue<PlayerStateSnapshot> playerStates = new Queue<PlayerStateSnapshot>();
         private readonly Queue<BossStateSnapshot> bossStates = new Queue<BossStateSnapshot>();
+        private readonly HashSet<uint> retiredInputSessionNonces = new HashSet<uint>();
+        private readonly HashSet<uint> retiredStateSessionNonces = new HashSet<uint>();
         private readonly byte[] receiveBuffer = new byte[4096];
         private byte[] sending;
         private PlayerStateSnapshot pendingPlayerState;
@@ -28,6 +30,8 @@ namespace Coophead.Transport
         private uint nextSceneSequence = 1, nextContextSequence = 1;
         private uint lastInputTick, lastSceneSequence, lastContextSequence, lastStateTick,
             lastBossStateTick;
+        private uint lastInputSessionNonce;
+        private uint lastStateSessionNonce;
         private InputButtons lastHeld;
         private bool handshakeQueued;
 
@@ -54,6 +58,8 @@ namespace Coophead.Transport
         public string Status { get; private set; }
         public string RoomCode { get; private set; }
         public bool IsConnected { get; private set; }
+        public bool PeerDisconnected { get; private set; }
+        public TransportDisconnectReason PeerDisconnectReason { get; private set; }
         public int PingMilliseconds { get; private set; }
         public int EstimatedPacketLossPercent => -1;
 
@@ -79,11 +85,33 @@ namespace Coophead.Transport
             frames.Clear(); scenes.Clear(); contexts.Clear(); playerStates.Clear(); bossStates.Clear();
             lastInputTick = lastSceneSequence = lastContextSequence = lastStateTick =
                 lastBossStateTick = 0;
+            lastInputSessionNonce = 0;
+            lastStateSessionNonce = 0;
+            retiredInputSessionNonces.Clear();
+            retiredStateSessionNonces.Clear();
             lastHeld = InputButtons.None;
             pendingPlayerState = default(PlayerStateSnapshot);
             hasPendingPlayerState = false;
             pendingBossStateFrame = null;
             preferBossState = false;
+            PeerDisconnected = false;
+            PeerDisconnectReason = TransportDisconnectReason.None;
+        }
+
+        public void RequestDisconnect(TransportDisconnectReason reason)
+        {
+            if (!IsConnected)
+                return;
+            var normalized = NormalizeDisconnectReason(reason);
+            var packet = LanControlPacketCodec.Encode(
+                LanControlPacketCodec.Goodbye, (uint)normalized);
+            // TCP ya es fiable; tres copias también mantienen la semántica de la
+            // despedida UDP si el relay se cierra inmediatamente después.
+            QueueData(packet);
+            QueueData(packet);
+            QueueData(packet);
+            Flush();
+            Status = "cerrando sesión";
         }
 
         public void Send(InputFrame frame) { if (!host && IsConnected) QueueData(InputFramePacketCodec.Encode(frame)); }
@@ -154,9 +182,41 @@ namespace Coophead.Transport
 
         private void HandleGamePacket(byte[] packet)
         {
+            if (HasIncompatibleProtocol(packet))
+            {
+                IsConnected = false;
+                Status = "relay: versión incompatible";
+                return;
+            }
+            byte controlType;
+            uint controlValue;
+            if (LanControlPacketCodec.TryDecode(packet, out controlType,
+                out controlValue))
+            {
+                if (controlType == LanControlPacketCodec.Goodbye)
+                {
+                    var reason = DecodeDisconnectReason(controlValue);
+                    QueueData(LanControlPacketCodec.Encode(
+                        LanControlPacketCodec.GoodbyeAck, (uint)reason));
+                    PeerDisconnected = true;
+                    PeerDisconnectReason = reason;
+                    IsConnected = false;
+                    Status = reason == TransportDisconnectReason.RemovePlayer ?
+                        "el otro jugador removió a Player Two" :
+                        "el otro jugador se desconectó";
+                }
+                else if (controlType == LanControlPacketCodec.GoodbyeAck)
+                {
+                    IsConnected = false;
+                    Status = "sesión cerrada";
+                }
+                return;
+            }
             InputFrame input;
             if (InputFramePacketCodec.TryDecode(packet, out input) && host)
             {
+                if (!TryActivateInputSessionNonce(input.InputSessionNonce))
+                    return;
                 if (input.Tick <= lastInputTick && lastInputTick != 0) return;
                 input.Pressed |= input.Held & ~lastHeld; input.Released |= lastHeld & ~input.Held;
                 lastHeld = input.Held; lastInputTick = input.Tick; frames.Enqueue(input); return;
@@ -168,15 +228,14 @@ namespace Coophead.Transport
             if (LanSessionContextPacketCodec.TryDecode(packet, out context) && !host && context.Sequence > lastContextSequence)
             { lastContextSequence = context.Sequence; contexts.Enqueue(context); return; }
             PlayerStateSnapshot state;
-            if (LanPlayerStatePacketCodec.TryDecode(packet, out state) && !host && state.Tick > lastStateTick)
+            if (LanPlayerStatePacketCodec.TryDecode(packet, out state) && !host)
             {
+                if (!TryActivateStateSessionNonce(state.StateSessionNonce))
+                    return;
+                if (lastStateTick != 0 &&
+                    unchecked((int)(state.Tick - lastStateTick)) <= 0)
+                    return;
                 lastStateTick = state.Tick;
-                while (playerStates.Count > 0)
-                {
-                    var skipped = playerStates.Dequeue();
-                    LanPlayerStatePacketCodec.MergeTransientEvents(
-                        ref state, skipped);
-                }
                 playerStates.Enqueue(state);
                 return;
             }
@@ -189,6 +248,60 @@ namespace Coophead.Transport
                 bossStates.Clear();
                 bossStates.Enqueue(bossState);
             }
+        }
+
+        private bool TryActivateInputSessionNonce(uint nonce)
+        {
+            if (nonce == 0 || nonce == lastInputSessionNonce)
+                return true;
+            if (retiredInputSessionNonces.Contains(nonce))
+                return false;
+            if (lastInputSessionNonce != 0)
+                retiredInputSessionNonces.Add(lastInputSessionNonce);
+            lastInputSessionNonce = nonce;
+            lastInputTick = 0;
+            lastHeld = InputButtons.None;
+            frames.Clear();
+            return true;
+        }
+
+        private static TransportDisconnectReason DecodeDisconnectReason(uint value)
+        {
+            return value == (uint)TransportDisconnectReason.RemovePlayer ?
+                TransportDisconnectReason.RemovePlayer :
+                TransportDisconnectReason.Normal;
+        }
+
+        private static TransportDisconnectReason NormalizeDisconnectReason(
+            TransportDisconnectReason reason)
+        {
+            return reason == TransportDisconnectReason.RemovePlayer ?
+                TransportDisconnectReason.RemovePlayer :
+                TransportDisconnectReason.Normal;
+        }
+
+        private static bool HasIncompatibleProtocol(byte[] packet)
+        {
+            return packet != null && packet.Length >= 6 &&
+                packet[0] == 'C' && packet[1] == 'O' &&
+                packet[2] == 'O' && packet[3] == 'P' &&
+                packet[4] != InputFramePacketCodec.ProtocolVersion;
+        }
+
+        private bool TryActivateStateSessionNonce(uint nonce)
+        {
+            if (nonce == 0 || nonce == lastStateSessionNonce)
+                return true;
+            if (retiredStateSessionNonces.Contains(nonce))
+                return false;
+            if (lastStateSessionNonce != 0)
+                retiredStateSessionNonces.Add(lastStateSessionNonce);
+            lastStateSessionNonce = nonce;
+            lastStateTick = 0;
+            lastBossStateTick = 0;
+            playerStates.Clear();
+            bossStates.Clear();
+            return true;
         }
 
         private void QueueData(byte[] payload) { QueueFrame(Data, payload); }

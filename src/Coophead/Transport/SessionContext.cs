@@ -10,6 +10,9 @@ namespace Coophead.Transport
         public int CurrentMap;
         public int CurrentLevel;
         public uint LoadTransitionId;
+        public uint GuestLoadoutRevision;
+        public PlayerLoadoutSnapshot PlayerOneLoadout;
+        public PlayerLoadoutSnapshot PlayerTwoLoadout;
 
         public bool HasSave => (Flags & 1) != 0;
         public bool PlayerOneIsMugman => (Flags & 2) != 0;

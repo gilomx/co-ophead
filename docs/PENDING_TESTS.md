@@ -1,62 +1,93 @@
-# Pruebas pendientes
-
-## Goopy: EX/Super e impacto después de dash
+# Prueba 0.12.10: loadout, controles, desconexión, mapa y revive
 
 **Estado:** pendiente de prueba manual en dos equipos.
 
-Esta prueba valida las correcciones añadidas después de observar que el EX del
-host no aparecía en el invitado y que un dash de Player Two contra Goopy podía
-dejar posiciones distintas de forma permanente.
+Usar en ambos extremos exactamente:
 
-Paquetes que deben usarse en ambos extremos:
+- `releases/Coophead-0.12.10-Windows-x64-PRUEBA-NORMAL.zip`
+- `RunInBackground = false`
+- `BlockLocalInputWhenUnfocused = false`
 
-- `releases/Coophead-AirGPU-Windows-x64-PRUEBA-GOOPY-EX-IMPACTO.zip`
-  en AirGPU, con `RunInBackground = false`.
-- `releases/Coophead-Local-Windows-x64-PRUEBA-GOOPY-EX-IMPACTO.zip`
-  en la PC local, con `RunInBackground = true` sólo durante el desarrollo.
+No mezclar esta versión con una anterior: el protocolo 13 rechazará la conexión para
+evitar una sala que parezca unida pero no intercambie input.
 
-No mezclar estos paquetes con compilaciones anteriores: ambos equipos deben usar
-la misma compilación y entrar a Goopy Le Grande en dificultad Normal/Regular.
+## Prueba específica del caso 5/3
 
-### Qué se debe probar
+1. Antes de pulsar **UNIRSE**, equipar en Player One del invitado **Corazón doble**
+   y dejar al Player Two del save del host sin ese amuleto.
+2. Crear la sala. En el host no debe aparecer **EMPEZAR** hasta que el loadout del
+   invitado haya sido aceptado; normalmente tarda menos de un segundo.
+3. Entrar a Goopy. Player Two debe iniciar con cinco puntos de vida en ambas PCs,
+   y Player One debe mostrar en el invitado la misma vida/amuleto que tiene el host.
+4. Repetir con arma primaria, secundaria y súper distintos. Cambiar de arma y usar
+   EX debe producir la misma arma/animación en ambas PCs.
+5. Desconectar y abrir una partida local. Cada equipo debe recuperar su equipamiento
+   anterior; el loadout prestado no debe quedar escrito en ningún save. Comprobar
+   también que el contador de muertes, monedas y posición del invitado no cambiaron.
+6. Guardar los logs y comprobar en el invitado una línea
+   `[LoadoutSync] Vida máxima verificada en ambas PCs`. Si aparece
+   `La vida máxima local no coincide`, adjuntar los dos logs.
 
-1. Entrar a Goopy desde el host y confirmar que la carga coordinada termina en
-   ambos equipos y nadie puede moverse antes de `WALLOP`.
-2. En el invitado, probar caminar, salto, disparo, dash, fijar dirección y EX.
-   En teclado: `C` fija, `V` usa EX/Super y `Shift` hace dash. En mando Xbox:
-   `RB` fija y `B` usa EX/Super.
-3. Hacer uno o varios EX desde el host. En el invitado deben verse la animación,
-   el sonido y el proyectil; no debe verse únicamente el pequeño retroceso del
-   personaje. Repetir también con Super si hay medidor suficiente.
-4. Hacer EX/Super desde el invitado y comprobar que la acción aparece tanto en
-   su propia ventana como en la del host.
-5. Hacer un dash de Player Two sin tocar a Goopy. Debe sentirse inmediato y no
-   debe existir corrección, tirón ni rebobinado al terminar.
-6. Hacer un dash de Player Two contra Goopy desde la izquierda y desde la derecha.
-   El contacto puede verse en instantes ligeramente distintos por el ping, pero
-   después del golpe deben coincidir la vida, la posición y la dirección del
-   knockback en ambas pantallas.
-7. Al terminar el golpe, Player Two debe recuperar el control inmediatamente y
-   continuar caminando y disparando desde la misma zona en ambos equipos. No debe
-   conservarse un desplazamiento permanente.
-8. Repetir un golpe normal contra cada jugador y comprobar que no se descuenta
-   vida dos veces. Si es posible, probar muerte y reanimación.
-9. Completar las tres fases de Goopy y verificar transformación, lápida, KO,
-   resultado y regreso al mapa en ambos equipos.
+Esta ronda usa el Player One del slot local activo del invitado como Player Two. El
+selector explícito de save del invitado sigue pendiente. Reliquia maldita/divina,
+Djimmi y el cambio de bomba en niveles de avión requieren pruebas separadas porque
+también dependen de progreso o inventario, no sólo del ID equipado.
 
-### Resultado aceptable y fallos
+## Qué se debe probar
+
+1. Abrir el host y el invitado en equipos distintos. Al cambiar de ventana, Cuphead
+   debe comportarse normalmente: no continúa ejecutando input en segundo plano y no
+   aparece ningún bloqueo o rearme del filtro experimental.
+2. Usar en el invitado una configuración de teclado o mando distinta a la del host.
+   Cada tecla debe ejecutar una sola acción; no debe aparecer caminar agachado por
+   combinar Player One, Player Two o teclas fijas.
+3. Acercar al invitado a una interacción del mapa. El globo debe incluir la tecla o
+   botón configurado localmente, no quedar vacío.
+4. Separar a ambos jugadores en el mapa y caminar al mismo tiempo. En el invitado no
+   debe haber regresos a posiciones anteriores ni rutas transitables sólo por unos
+   segundos. Ambos actores deben moverse de forma continua desde el estado del host.
+5. Con Player Two, confirmar Goopy. Sólo el host debe abrir y resolver el menú de
+   dificultad; el invitado espera la orden autoritativa y ambos cargan el mismo nivel.
+   El menú ya no debe alternarse entre una ventana y la otra.
+6. Perder la partida y seleccionar **RETRY**. El invitado debe cargar una generación
+   nueva de la escena; el menú de derrota anterior no puede permanecer sobre el juego.
+7. Durante una carga lenta, volver a reintentar si es posible. El loader anterior debe
+   terminar antes de iniciar el nuevo y ninguna pantalla puede quedar retenida.
+8. En el invitado, probar caminar, salto, disparo, dash, fijar dirección y EX usando
+   sus bindings reales, no teclas predeterminadas del mod.
+9. Hacer varios EX desde Player Two, incluyendo uno cerca de una transición o pausa.
+   Deben verse tanto en el invitado como en el host y descontar una sola carta.
+10. Hacer EX/Super desde Player One. En el invitado deben verse la animación, sonido y
+   proyectil completos, no sólo el retroceso del personaje.
+11. Observar las tres fases de Goopy. El movimiento remoto puede llevar el retraso del
+   ping, pero no debe frenarse a intervalos regulares ni teletransportarse en distancias
+   pequeñas. Las transiciones de actor/fase sí pueden hacer una corrección inmediata.
+12. Matar a Player One y revivirlo desde Player Two. El fantasma debe reproducir una
+    sola salida, desaparecer y reactivar al jugador una vez, sin caídas o reapariciones.
+13. Hacer un dash de Player Two contra Goopy desde ambos lados. Después del golpe deben
+    coincidir vida, posición y dirección del knockback, sin doble daño ni control trabado.
+14. Quitar el foco hasta mostrar la espera. **Seguir esperando** debe iniciar seleccionado
+    y se debe poder cambiar/aceptar con teclado o mando, sin mouse.
+15. Desde el invitado seleccionar **Desconectar**. El host debe recibir el aviso de
+    salida y continuar solo inmediatamente, sin esperar el timeout.
+16. Volver a conectar y seleccionar **Remover Player Two**. Ambos juegos deben cerrar
+    la sesión y volver al inicio; Player Two no debe reaparecer.
+17. Probar un código inexistente. Debe decir que la sala no existe o expiró, sin
+    `Generic/unknown HTTP error`.
+18. Completar el combate, KO, resultados y regreso al mapa en ambos equipos.
+
+## Resultado aceptable y diagnóstico
 
 Con 90–100 ms de ping es aceptable una diferencia visual breve en el instante del
-contacto. Se considera fallo cualquiera de estos casos:
+contacto. Se considera fallo si:
 
-- el EX/Super del host no aparece completo en el invitado;
-- fijar o EX no responde en el invitado;
-- un dash sin golpe se siente corregido o pesado;
-- después de un golpe los jugadores quedan en posiciones distintas;
-- se descuenta vida dos veces, queda bloqueado el estado de golpe o no vuelve el
-  control;
-- las fases, vida o KO de Goopy divergen.
+- el mapa o la selección de nivel divergen;
+- queda un menú de derrota sobre una partida reiniciada;
+- EX/Super no aparece, se ejecuta dos veces o descuenta dos cartas;
+- Goopy avanza a cortes regulares o queda en una fase distinta;
+- un jugador conserva una posición, golpe o bloqueo diferente;
+- la sesión muestra conectada una versión incompatible.
 
-Si ocurre un fallo, anotar cuál fue la primera acción diferente y guardar
-`BepInEx/LogOutput.log` de ambos equipos antes de volver a abrir Cuphead. También
-conviene registrar el ping mostrado y desde qué lado llegó el golpe.
+Si ocurre un fallo, guardar `BepInEx/LogOutput.log` de ambos equipos antes de volver
+a abrir Cuphead. Anotar la primera acción diferente, el ping mostrado y si ocurrió
+durante mapa, carga, pausa, EX o cambio de fase.

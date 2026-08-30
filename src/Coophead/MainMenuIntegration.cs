@@ -120,6 +120,8 @@ namespace Coophead
 
         public static bool BeforeMainMenuUpdate(SlotSelectScreen screen)
         {
+            if (RemoteInputLab.LocalPhysicalInputBlocked)
+                return false;
             var controller = screen == null ? null :
                 screen.GetComponent<CoopheadMainMenuController>();
             if (controller == null)
@@ -272,7 +274,7 @@ namespace Coophead
 
         public bool AcceptPressed()
         {
-            return IsAcceptDown();
+            return !RemoteInputLab.LocalPhysicalInputBlocked && IsAcceptDown();
         }
 
         public void Open()
@@ -285,9 +287,11 @@ namespace Coophead
                 plugin.HideFallbackOnlineWindow();
 
             if (RemoteInputLab.IsHostSession)
-                page = RemoteInputLab.IsConnected ? Page.HostReady : Page.HostWaiting;
+                page = RemoteInputLab.LoadoutHandshakeReady ?
+                    Page.HostReady : Page.HostWaiting;
             else if (RemoteInputLab.IsClientSession)
-                page = RemoteInputLab.IsConnected ? Page.GuestWaiting : Page.GuestJoining;
+                page = RemoteInputLab.LoadoutHandshakeReady ?
+                    Page.GuestWaiting : Page.GuestJoining;
             else
                 page = Page.Root;
 
@@ -306,6 +310,15 @@ namespace Coophead
             KeepEntryLabel();
             if (!PanelOpen)
                 return;
+
+            if (RemoteInputLab.LocalPhysicalInputBlocked)
+            {
+                UpdateSessionPage();
+                RenderPage();
+                UpdateLoaderPosition();
+                codeInputConsumedThisFrame = false;
+                return;
+            }
 
             if (saveSelectionPending)
             {
@@ -460,9 +473,11 @@ namespace Coophead
         {
             Page desired;
             if (RemoteInputLab.IsHostSession)
-                desired = RemoteInputLab.IsConnected ? Page.HostReady : Page.HostWaiting;
+                desired = RemoteInputLab.LoadoutHandshakeReady ?
+                    Page.HostReady : Page.HostWaiting;
             else if (RemoteInputLab.IsClientSession)
-                desired = RemoteInputLab.IsConnected ? Page.GuestWaiting : Page.GuestJoining;
+                desired = RemoteInputLab.LoadoutHandshakeReady ?
+                    Page.GuestWaiting : Page.GuestJoining;
             else
             {
                 var failedAttempt = (page == Page.HostWaiting || page == Page.GuestJoining) &&

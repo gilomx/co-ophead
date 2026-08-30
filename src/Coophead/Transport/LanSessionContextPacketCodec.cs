@@ -3,7 +3,12 @@ namespace Coophead.Transport
     internal static class LanSessionContextPacketCodec
     {
         public const byte ContextPacketType = 9;
-        public const int PacketSize = 26;
+        public const int PacketSize = 64;
+        private const PlayerLoadoutFlags AllLoadoutFlags =
+            PlayerLoadoutFlags.HasEquippedSecondaryRegularWeapon |
+            PlayerLoadoutFlags.HasEquippedSecondaryShmupWeapon |
+            PlayerLoadoutFlags.MustNotifySwitchRegularWeapon |
+            PlayerLoadoutFlags.MustNotifySwitchShmupWeapon;
 
         public static byte[] Encode(SessionContext context)
         {
@@ -20,6 +25,9 @@ namespace Coophead.Transport
             WriteUInt32(packet, 14, unchecked((uint)context.CurrentMap));
             WriteUInt32(packet, 18, unchecked((uint)context.CurrentLevel));
             WriteUInt32(packet, 22, context.LoadTransitionId);
+            WriteUInt32(packet, 26, context.GuestLoadoutRevision);
+            WriteLoadout(packet, 30, context.PlayerOneLoadout);
+            WriteLoadout(packet, 47, context.PlayerTwoLoadout);
             return packet;
         }
 
@@ -40,7 +48,47 @@ namespace Coophead.Transport
             context.CurrentMap = unchecked((int)ReadUInt32(packet, 14));
             context.CurrentLevel = unchecked((int)ReadUInt32(packet, 18));
             context.LoadTransitionId = ReadUInt32(packet, 22);
-            return context.Sequence != 0 && context.Difficulty <= 2;
+            context.GuestLoadoutRevision = ReadUInt32(packet, 26);
+            context.PlayerOneLoadout = ReadLoadout(packet, 30);
+            context.PlayerTwoLoadout = ReadLoadout(packet, 47);
+            return context.Sequence != 0 && context.Difficulty <= 2 &&
+                (!context.HasSave ||
+                    (IsValidWireLoadout(context.PlayerOneLoadout) &&
+                    IsValidWireLoadout(context.PlayerTwoLoadout)));
+        }
+
+        private static void WriteLoadout(byte[] buffer, int offset,
+            PlayerLoadoutSnapshot loadout)
+        {
+            WriteUInt32(buffer, offset,
+                unchecked((uint)loadout.PrimaryWeapon));
+            WriteUInt32(buffer, offset + 4,
+                unchecked((uint)loadout.SecondaryWeapon));
+            WriteUInt32(buffer, offset + 8,
+                unchecked((uint)loadout.Super));
+            WriteUInt32(buffer, offset + 12,
+                unchecked((uint)loadout.Charm));
+            buffer[offset + 16] = (byte)loadout.Flags;
+        }
+
+        private static PlayerLoadoutSnapshot ReadLoadout(byte[] buffer,
+            int offset)
+        {
+            return new PlayerLoadoutSnapshot
+            {
+                PrimaryWeapon = unchecked((int)ReadUInt32(buffer, offset)),
+                SecondaryWeapon = unchecked((int)ReadUInt32(buffer, offset + 4)),
+                Super = unchecked((int)ReadUInt32(buffer, offset + 8)),
+                Charm = unchecked((int)ReadUInt32(buffer, offset + 12)),
+                Flags = (PlayerLoadoutFlags)buffer[offset + 16],
+            };
+        }
+
+        private static bool IsValidWireLoadout(PlayerLoadoutSnapshot loadout)
+        {
+            return loadout.PrimaryWeapon != 0 && loadout.SecondaryWeapon != 0 &&
+                loadout.Super != 0 && loadout.Charm != 0 &&
+                (loadout.Flags & ~AllLoadoutFlags) == 0;
         }
 
         private static void WriteUInt32(byte[] buffer, int offset, uint value)

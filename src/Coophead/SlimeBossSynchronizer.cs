@@ -11,7 +11,14 @@ namespace Coophead
         private const byte BigActor = 2;
         private const byte TombstoneActor = 4;
         private const float SnapshotTimeoutSeconds = 0.5f;
+        private const float MinVelocitySampleSeconds = 0.008f;
+        private const float VelocityStallSeconds = 0.25f;
         private const float MaxExtrapolationSeconds = 0.12f;
+        private const float VelocityFilterWeight = 0.3f;
+        private const float MaxInferredSpeed = 900f;
+        private const float MaxExtrapolationDistance = 32f;
+        private const float ActorEmergencySnapDistance = 160f;
+        private const float ActorFollowSpeed = 30f;
         private const float PlayerImpactFollowSpeed = 30f;
         private const float PlayerImpactSnapDistance = 30f;
 
@@ -61,6 +68,14 @@ namespace Coophead
         private static readonly System.Reflection.FieldInfo PlayerHitVelocityField =
             PlayerMotorVelocityManagerField == null ? null :
                 AccessTools.Field(PlayerMotorVelocityManagerField.FieldType, "hit");
+        private static readonly System.Reflection.FieldInfo PlayerIsRevivingField =
+            AccessTools.Field(typeof(AbstractPlayerController), "_isReviving");
+        private static readonly System.Reflection.FieldInfo DeathEffectPlayerIdField =
+            AccessTools.Field(typeof(PlayerDeathEffect), "playerId");
+        private static readonly System.Reflection.FieldInfo DeathEffectExitingField =
+            AccessTools.Field(typeof(PlayerDeathEffect), "exiting");
+        private static readonly System.Reflection.MethodInfo DeathEffectParryMethod =
+            AccessTools.Method(typeof(PlayerDeathEffect), "OnParrySwitch");
 
         private static BossStateSnapshot latest;
         private static bool hasLatest;
@@ -75,8 +90,9 @@ namespace Coophead
         private static bool defeatLogged;
         private static bool authorityArmed;
         private static byte playerHealthBaselineMask;
-        private static byte lastAuthoritativeDeadMask;
         private static byte authoritativeDeathAppliedMask;
+        private static AuthoritativePlayerLifeState playerOneLifeState;
+        private static AuthoritativePlayerLifeState playerTwoLifeState;
         private static bool applyingAuthoritativePlayerDamage;
         private static bool applyingAuthoritativeBossEvent;
         private static bool bossDefeatEffectsApplied;
@@ -121,8 +137,9 @@ namespace Coophead
             defeatLogged = false;
             authorityArmed = false;
             playerHealthBaselineMask = 0;
-            lastAuthoritativeDeadMask = 0;
             authoritativeDeathAppliedMask = 0;
+            playerOneLifeState = AuthoritativePlayerLifeState.Unknown;
+            playerTwoLifeState = AuthoritativePlayerLifeState.Unknown;
             applyingAuthoritativePlayerDamage = false;
             applyingAuthoritativeBossEvent = false;
             bossDefeatEffectsApplied = false;
@@ -228,12 +245,19 @@ namespace Coophead
                         PrimaryActor(state.ActiveActor))
                 {
                     var elapsed = now - latestReceivedRealtime;
-                    if (elapsed >= 0.008f && elapsed <= 0.25f)
+                    if (elapsed >= MinVelocitySampleSeconds &&
+                        elapsed <= VelocityStallSeconds)
                     {
-                        inferredVelocity = new Vector2(
+                        var measuredVelocity = new Vector2(
                             (state.X - latest.X) / elapsed,
                             (state.Y - latest.Y) / elapsed);
+                        measuredVelocity = Vector2.ClampMagnitude(
+                            measuredVelocity, MaxInferredSpeed);
+                        inferredVelocity = Vector2.Lerp(inferredVelocity,
+                            measuredVelocity, VelocityFilterWeight);
                     }
+                    else
+                        inferredVelocity = Vector2.zero;
                 }
                 else
                 {
@@ -279,9 +303,14 @@ namespace Coophead
             if (!ShouldSuppressClientSimulation || !hasLatest ||
                 RemoteInputLab.SessionOverlayVisible ||
                 RemoteInputLab.SceneTransitionActive ||
-                latestScene != SceneManager.GetActiveScene().name ||
-                Time.realtimeSinceStartup - latestReceivedRealtime >
-                    SnapshotTimeoutSeconds)
+                latestScene != SceneManager.GetActiveScene().name)
+                return;
+
+            var snapshotAge = Time.realtimeSinceStartup -
+                latestReceivedRealtime;
+            if (snapshotAge > VelocityStallSeconds)
+                inferredVelocity = Vector2.zero;
+            if (snapshotAge > SnapshotTimeoutSeconds)
                 return;
 
             var level = Level.Current as SlimeLevel;
@@ -325,6 +354,9 @@ namespace Coophead
                 !Level.Current.Started)
             {
                 playerHealthBaselineMask = 0;
+                authoritativeDeathAppliedMask = 0;
+                playerOneLifeState = AuthoritativePlayerLifeState.Unknown;
+                playerTwoLifeState = AuthoritativePlayerLifeState.Unknown;
                 playerTwoImpactReconciliationActive = false;
                 return;
             }
@@ -333,9 +365,6 @@ namespace Coophead
             var playerTwoDamaged = ApplyOrBaselinePlayer(
                 PlayerId.PlayerTwo, 2, state);
             ApplyPlayerTwoImpactReconciliation(state, playerTwoDamaged);
-            lastAuthoritativeDeadMask = (byte)(
-                (lastAuthoritativeDeadMask & ~state.PresentMask) |
-                (state.DeadMask & state.PresentMask));
         }
 
         private static void ArmClientAuthority()
@@ -439,17 +468,21 @@ namespace Coophead
                 prediction += RemoteInputLab.PingMilliseconds * 0.0005f;
             prediction = Mathf.Clamp(prediction, 0f,
                 MaxExtrapolationSeconds);
+            var extrapolation = Vector2.ClampMagnitude(
+                inferredVelocity * prediction, MaxExtrapolationDistance);
             var target = new Vector3(
-                latest.X + inferredVelocity.x * prediction,
-                latest.Y + inferredVelocity.y * prediction,
+                latest.X + extrapolation.x,
+                latest.Y + extrapolation.y,
                 actor.transform.position.z);
             var distance = Vector2.Distance(actor.transform.position, target);
-            if (distance > 40f)
+            var actorChanged = PrimaryActor(lastAppliedActors) !=
+                PrimaryActor(latest.ActiveActor);
+            if (actorChanged || distance > ActorEmergencySnapDistance)
                 actor.transform.position = target;
             else
                 actor.transform.position = Vector3.Lerp(
                     actor.transform.position, target,
-                    Mathf.Clamp01(Time.unscaledDeltaTime * 30f));
+                    Mathf.Clamp01(Time.unscaledDeltaTime * ActorFollowSpeed));
 
             var scale = actor.transform.localScale;
             scale.x = latest.ScaleX;
@@ -470,12 +503,8 @@ namespace Coophead
             if (!animator.enabled)
                 animator.enabled = true;
             var localState = animator.GetCurrentAnimatorStateInfo(0);
-            var localTime = Mathf.Repeat(localState.normalizedTime, 1f);
-            var remoteTime = Mathf.Repeat(latest.AnimatorNormalizedTime, 1f);
-            var timeDistance = Mathf.Abs(localTime - remoteTime);
-            timeDistance = Mathf.Min(timeDistance, 1f - timeDistance);
-            if (localState.fullPathHash != latest.AnimatorStateHash ||
-                timeDistance > 0.15f)
+            if (actorChanged ||
+                localState.fullPathHash != latest.AnimatorStateHash)
             {
                 animator.Play(latest.AnimatorStateHash, 0,
                     latest.AnimatorNormalizedTime);
@@ -553,20 +582,24 @@ namespace Coophead
         {
             if ((state.PresentMask & mask) == 0)
                 return false;
+            var targetHealth = id == PlayerId.PlayerOne ?
+                state.PlayerOneHealth : state.PlayerTwoHealth;
+            var targetSuperMeter = id == PlayerId.PlayerOne ?
+                state.PlayerOneSuperMeter : state.PlayerTwoSuperMeter;
+            var authoritativeX = id == PlayerId.PlayerOne ?
+                state.PlayerOneX : state.PlayerTwoX;
+            var authoritativeY = id == PlayerId.PlayerOne ?
+                state.PlayerOneY : state.PlayerTwoY;
+            var authoritativeHitDirection = id == PlayerId.PlayerTwo ?
+                state.PlayerTwoHitDirection : (sbyte)0;
+            var lifeState = GetAuthoritativeLifeState(id, mask, state);
+            var previousLifeState = GetTrackedLifeState(id);
             if ((playerHealthBaselineMask & mask) != 0)
             {
                 return ApplyPlayerHealth(id, mask,
-                    id == PlayerId.PlayerOne ? state.PlayerOneHealth :
-                        state.PlayerTwoHealth,
-                    id == PlayerId.PlayerOne ? state.PlayerOneSuperMeter :
-                        state.PlayerTwoSuperMeter,
-                    state.DeadMask,
-                    id == PlayerId.PlayerOne ? state.PlayerOneX :
-                        state.PlayerTwoX,
-                    id == PlayerId.PlayerOne ? state.PlayerOneY :
-                        state.PlayerTwoY,
-                    id == PlayerId.PlayerTwo ?
-                        state.PlayerTwoHitDirection : (sbyte)0);
+                    targetHealth, targetSuperMeter, lifeState,
+                    previousLifeState, authoritativeX, authoritativeY,
+                    authoritativeHitDirection);
             }
 
             AbstractPlayerController player;
@@ -574,28 +607,36 @@ namespace Coophead
             catch { return false; }
             if (player == null || player.stats == null)
                 return false;
-            var health = id == PlayerId.PlayerOne ?
-                state.PlayerOneHealth : state.PlayerTwoHealth;
-            var hostDead = (state.DeadMask & mask) != 0;
-            if (hostDead)
+            if (lifeState == AuthoritativePlayerLifeState.Dead)
             {
                 player.stats.SetHealth(0);
                 EnsurePlayerDeath(player, mask);
             }
-            else if (player.stats.Health != health)
+            else if (lifeState == AuthoritativePlayerLifeState.Reviving &&
+                (player.IsDead || IsPlayerReviving(player) ||
+                    FindPlayerDeathEffect(id, out _, out _) != null))
             {
-                player.stats.SetHealth(health);
+                BeginAuthoritativeRevive(player, mask, targetHealth,
+                    authoritativeX, authoritativeY);
             }
-            SetPlayerSuperMeter(player.stats, id, id == PlayerId.PlayerOne ?
-                state.PlayerOneSuperMeter : state.PlayerTwoSuperMeter);
+            else if (player.stats.Health != targetHealth)
+            {
+                player.stats.SetHealth(targetHealth);
+            }
+            SetPlayerSuperMeter(player.stats, id, targetSuperMeter);
             playerHealthBaselineMask |= mask;
+            SetTrackedLifeState(id, lifeState);
+            ReportLifeTransition(id, previousLifeState, lifeState,
+                targetHealth, "baseline");
             Plugin.Log.LogInfo("[BossSync] " + id +
-                " alineado con el host (HP=" + health + ").");
+                " alineado con el host (HP=" + targetHealth + ").");
             return false;
         }
 
         private static bool ApplyPlayerHealth(PlayerId id, byte mask,
-            byte targetHealth, float targetSuperMeter, byte deadMask,
+            byte targetHealth, float targetSuperMeter,
+            AuthoritativePlayerLifeState lifeState,
+            AuthoritativePlayerLifeState previousLifeState,
             float authoritativeX, float authoritativeY,
             sbyte authoritativeHitDirection)
         {
@@ -606,8 +647,9 @@ namespace Coophead
                 return false;
 
             var currentHealth = player.stats.Health;
-            var hostDead = (deadMask & mask) != 0;
-            var damageApplied = targetHealth < currentHealth;
+            var damageApplied = lifeState !=
+                AuthoritativePlayerLifeState.Reviving &&
+                targetHealth < currentHealth;
             if (damageApplied)
             {
                 AlignPlayerToAuthority(player, authoritativeX,
@@ -638,29 +680,63 @@ namespace Coophead
                     }
                 }
                 SetPlayerHitDirection(player, authoritativeHitDirection);
-                if (!hostDead && player.stats.Health != targetHealth)
+                if (lifeState != AuthoritativePlayerLifeState.Dead &&
+                    player.stats.Health != targetHealth)
                     player.stats.SetHealth(targetHealth);
                 Plugin.Log.LogMessage("[BossSync] Golpe de Goopy confirmado " +
                     "para " + id + " (HP=" + targetHealth + ").");
             }
 
-            if (hostDead)
+            if (lifeState == AuthoritativePlayerLifeState.Dead)
             {
                 if (player.stats.Health != 0)
                     player.stats.SetHealth(0);
                 EnsurePlayerDeath(player, mask);
             }
-            else if ((lastAuthoritativeDeadMask & mask) != 0 ||
-                (authoritativeDeathAppliedMask & mask) != 0)
+            else if (lifeState == AuthoritativePlayerLifeState.Reviving)
             {
-                RevivePlayer(player, mask, targetHealth,
-                    authoritativeX, authoritativeY);
+                if (previousLifeState == AuthoritativePlayerLifeState.Dead ||
+                    (previousLifeState !=
+                        AuthoritativePlayerLifeState.Reviving &&
+                    (player.IsDead || IsPlayerReviving(player) ||
+                        FindPlayerDeathEffect(id, out _, out _) != null)))
+                {
+                    BeginAuthoritativeRevive(player, mask, targetHealth,
+                        authoritativeX, authoritativeY);
+                }
+                else if (targetHealth > 0 &&
+                    player.stats.Health != targetHealth)
+                {
+                    player.stats.SetHealth(targetHealth);
+                }
             }
-            else if (targetHealth > player.stats.Health)
+            else
             {
-                player.stats.SetHealth(targetHealth);
+                if (previousLifeState == AuthoritativePlayerLifeState.Dead)
+                {
+                    // Si se perdió el snapshot Reviving, todavía recorremos una
+                    // sola vez el ghost local antes de adoptar Alive.
+                    BeginAuthoritativeRevive(player, mask, targetHealth,
+                        authoritativeX, authoritativeY);
+                }
+                if (targetHealth > player.stats.Health)
+                    player.stats.SetHealth(targetHealth);
+                if (previousLifeState ==
+                        AuthoritativePlayerLifeState.Reviving ||
+                    previousLifeState == AuthoritativePlayerLifeState.Dead)
+                {
+                    AlignPlayerToAuthority(player, authoritativeX,
+                        authoritativeY, true);
+                    authoritativeDeathAppliedMask = (byte)
+                        (authoritativeDeathAppliedMask & ~mask);
+                    Plugin.Log.LogInfo("[BossSync] " + id +
+                        " confirmó Alive sin repetir OnRevive.");
+                }
             }
             SetPlayerSuperMeter(player.stats, id, targetSuperMeter);
+            SetTrackedLifeState(id, lifeState);
+            ReportLifeTransition(id, previousLifeState, lifeState,
+                targetHealth, "snapshot");
             return damageApplied;
         }
 
@@ -786,6 +862,18 @@ namespace Coophead
             if (player == null || player.stats == null ||
                 (authoritativeDeathAppliedMask & mask) != 0)
                 return;
+            bool ghostExiting;
+            int ghostMatches;
+            var existingGhost = FindPlayerDeathEffect(player.id,
+                out ghostExiting, out ghostMatches);
+            if (existingGhost != null)
+            {
+                authoritativeDeathAppliedMask |= mask;
+                Plugin.Log.LogInfo("[BossSync] Muerte de " + player.id +
+                    " ya representada por el ghost local (exiting=" +
+                    ghostExiting + ", coincidencias=" + ghostMatches + ").");
+                return;
+            }
             if (!player.gameObject.activeSelf)
             {
                 authoritativeDeathAppliedMask |= mask;
@@ -804,43 +892,187 @@ namespace Coophead
             }
         }
 
-        private static void RevivePlayer(AbstractPlayerController player,
+        private static void BeginAuthoritativeRevive(
+            AbstractPlayerController player,
             byte mask, byte targetHealth, float x, float y)
         {
             if (player == null || player.stats == null)
                 return;
             var position = new Vector3(x, y, player.transform.position.z);
+            bool ghostExiting;
+            int ghostMatches;
+            var ghost = FindPlayerDeathEffect(player.id, out ghostExiting,
+                out ghostMatches);
             try
             {
-                var parameterTypes = new[] { typeof(Vector3) };
-                var preRevive = AccessTools.Method(player.GetType(),
-                    "OnPreRevive", parameterTypes);
-                var revive = AccessTools.Method(player.GetType(),
-                    "OnRevive", parameterTypes);
-                if (preRevive != null && revive != null)
+                if (ghost != null)
                 {
-                    preRevive.Invoke(player, new object[] { position });
-                    revive.Invoke(player, new object[] { position });
+                    if (ghostMatches > 1)
+                    {
+                        Plugin.Log.LogWarning("[BossSync] Se encontraron " +
+                            ghostMatches + " ghosts para " + player.id +
+                            "; sólo se accionará uno para evitar revives duplicadas.");
+                    }
+                    if (ghostExiting)
+                    {
+                        Plugin.Log.LogInfo("[BossSync] Revive de " + player.id +
+                            " ya estaba predicha por el ghost local; se adopta " +
+                            "la confirmación del host sin repetirla.");
+                    }
+                    else if (DeathEffectParryMethod != null)
+                    {
+                        DeathEffectParryMethod.Invoke(ghost, null);
+                        Plugin.Log.LogMessage("[BossSync] Revive de " + player.id +
+                            " inició el pipeline nativo del ghost.");
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning("[BossSync] El ghost de " +
+                            player.id + " existe, pero OnParrySwitch no está " +
+                            "disponible; no se invocará OnRevive por duplicado.");
+                    }
+                }
+                else if (IsPlayerReviving(player))
+                {
+                    Plugin.Log.LogInfo("[BossSync] Revive de " + player.id +
+                        " ya estaba en curso sin ghost visible; sólo se confirma.");
+                }
+                else if (!player.IsDead && player.gameObject.activeSelf &&
+                    player.stats.Health > 0)
+                {
+                    Plugin.Log.LogInfo("[BossSync] Revive de " + player.id +
+                        " ya terminó localmente antes del snapshot del host; " +
+                        "no se vuelve a ejecutar.");
                 }
                 else
                 {
-                    if (!player.gameObject.activeSelf)
-                        player.gameObject.SetActive(true);
-                    player.stats.SetHealth(Mathf.Max(1, targetHealth));
-                    player.stats.OnRevive();
+                    DirectReviveFallback(player, position, targetHealth);
                 }
                 if (targetHealth > 0 && player.stats.Health != targetHealth)
                     player.stats.SetHealth(targetHealth);
-                authoritativeDeathAppliedMask = (byte)
-                    (authoritativeDeathAppliedMask & ~mask);
-                Plugin.Log.LogMessage("[BossSync] Reanimación de " +
-                    player.id + " confirmada por el host.");
             }
             catch (System.Exception ex)
             {
-                Plugin.Log.LogWarning("[BossSync] No se pudo reproducir la " +
+                Plugin.Log.LogWarning("[BossSync] No se pudo iniciar la " +
                     "reanimación de " + player.id + ": " + ex.Message);
             }
+        }
+
+        private static void DirectReviveFallback(
+            AbstractPlayerController player, Vector3 position,
+            byte targetHealth)
+        {
+            Plugin.Log.LogWarning("[BossSync] No existe ghost para " +
+                player.id + "; se usará el fallback directo de revive una vez.");
+            var parameterTypes = new[] { typeof(Vector3) };
+            var preRevive = AccessTools.Method(player.GetType(),
+                "OnPreRevive", parameterTypes);
+            var revive = AccessTools.Method(player.GetType(),
+                "OnRevive", parameterTypes);
+            if (preRevive != null && revive != null)
+            {
+                preRevive.Invoke(player, new object[] { position });
+                revive.Invoke(player, new object[] { position });
+                return;
+            }
+
+            if (!player.gameObject.activeSelf)
+                player.gameObject.SetActive(true);
+            player.stats.SetHealth(Mathf.Max(1, targetHealth));
+            player.stats.OnRevive();
+        }
+
+        private static PlayerDeathEffect FindPlayerDeathEffect(PlayerId id,
+            out bool exiting, out int matches)
+        {
+            exiting = false;
+            matches = 0;
+            if (DeathEffectPlayerIdField == null)
+                return null;
+            PlayerDeathEffect first = null;
+            try
+            {
+                var effects = UnityEngine.Object.FindObjectsOfType<
+                    PlayerDeathEffect>();
+                for (var i = 0; i < effects.Length; i++)
+                {
+                    var effect = effects[i];
+                    if (effect == null ||
+                        (PlayerId)DeathEffectPlayerIdField.GetValue(effect) != id)
+                        continue;
+                    matches++;
+                    if (first != null)
+                        continue;
+                    first = effect;
+                    if (DeathEffectExitingField != null)
+                        exiting = (bool)DeathEffectExitingField.GetValue(effect);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning("[BossSync] No se pudo inspeccionar el " +
+                    "ghost de " + id + ": " + ex.Message);
+            }
+            return first;
+        }
+
+        private static bool IsPlayerReviving(
+            AbstractPlayerController player)
+        {
+            if (player == null || PlayerIsRevivingField == null)
+                return false;
+            try
+            {
+                return (bool)PlayerIsRevivingField.GetValue(player);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static AuthoritativePlayerLifeState GetAuthoritativeLifeState(
+            PlayerId id, byte mask, PlayerStateSnapshot state)
+        {
+            if ((state.DeadMask & mask) != 0)
+                return AuthoritativePlayerLifeState.Dead;
+            var motionFlags = id == PlayerId.PlayerOne ?
+                state.PlayerOneMotionFlags : state.PlayerTwoMotionFlags;
+            return (motionFlags & PlayerMotionFlags.Reviving) != 0 ?
+                AuthoritativePlayerLifeState.Reviving :
+                AuthoritativePlayerLifeState.Alive;
+        }
+
+        private static AuthoritativePlayerLifeState GetTrackedLifeState(
+            PlayerId id)
+        {
+            return id == PlayerId.PlayerOne ? playerOneLifeState :
+                playerTwoLifeState;
+        }
+
+        private static void SetTrackedLifeState(PlayerId id,
+            AuthoritativePlayerLifeState state)
+        {
+            if (id == PlayerId.PlayerOne)
+                playerOneLifeState = state;
+            else
+                playerTwoLifeState = state;
+        }
+
+        private static void ReportLifeTransition(PlayerId id,
+            AuthoritativePlayerLifeState previous,
+            AuthoritativePlayerLifeState current, byte health,
+            string source)
+        {
+            if (previous == current)
+                return;
+            bool ghostExiting;
+            int ghostMatches;
+            FindPlayerDeathEffect(id, out ghostExiting, out ghostMatches);
+            Plugin.Log.LogMessage("[BossSync] Vida autoritativa " + id +
+                ": " + previous + " -> " + current + " (HP=" + health +
+                ", origen=" + source + ", ghosts=" + ghostMatches +
+                ", ghostExiting=" + ghostExiting + ").");
         }
 
         private static void SetPlayerSuperMeter(PlayerStatsManager stats,
@@ -849,9 +1081,8 @@ namespace Coophead
             if (stats == null || SetSuperMeterMethod == null)
                 return;
             value = Mathf.Clamp(value, 0f, stats.SuperMeterMax);
-            if (id == PlayerId.PlayerOne &&
-                RemoteInputLab.ShouldDeferRemotePlayerOneSuperMeter(
-                    stats.SuperMeter, value))
+            if (RemoteInputLab.ShouldDeferRemotePlayerSuperMeter(id,
+                stats.SuperMeter, value))
                 return;
             if (Mathf.Abs(stats.SuperMeter - value) < 0.01f)
                 return;
@@ -899,6 +1130,14 @@ namespace Coophead
         {
             return candidate != current &&
                 unchecked((int)(candidate - current)) > 0;
+        }
+
+        private enum AuthoritativePlayerLifeState : byte
+        {
+            Unknown,
+            Alive,
+            Dead,
+            Reviving,
         }
     }
 }
